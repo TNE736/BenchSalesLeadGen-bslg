@@ -10,7 +10,9 @@ research the interested ones, send a qualifying follow-up, and hand qualified
 people to the Bench TA team. Phase 2 (the TA dashboard) is built only after
 Phase 1 runs end to end.
 
-The design source is `docs/DESIGN_SOURCE.md` (v0.4, 16 Sep 2026).
+The design source is `docs/DESIGN_SOURCE.md` (v0.4, 16 Sep 2026). **It is a flow
+reference only, not a spec** — see the standing decisions at the top of
+`docs/STEPS.md`. Field names, columns and rules in it are not commitments.
 
 ## 2. How we build — step by step, verified each time
 
@@ -37,12 +39,18 @@ Python 3.10+, no framework lock-in. FastAPI for the Gateway and Event Receiver
 (HTTP ingress), plain typed modules elsewhere. pytest with every external service
 mocked — the suite must run offline with no credentials.
 
-`pip install -e .`; source lives under `src/bench_outreach/`.
+`pip install -e .`; source lives under `src/bench_outreach/`. Only packages for
+steps that have been agreed exist — do not pre-create empty ones. Routing lives in
+`config/gateway.yaml`, never in code.
 
 ## 4. Conventions
 
 - **HubSpot is the system of record.** Agents hold no canonical lead state; on
   conflict HubSpot wins. `qualification_stage` is the progress field.
+- **No requisition linking / no `req_id`** (decided 16 Sep 2026).
+- **HubSpot only through HubSpot's hosted MCP** (`mcp.hubspot.com`) via
+  `common/hubspot_mcp.py`. No agent calls HubSpot REST directly; no MCP server of
+  our own (decided 16 Sep 2026).
 - **Stages:** loaded -> emailed -> engaged -> researched -> followed_up ->
   qualified -> handed_off. Closing stages: suppressed, closed, invalid, referred.
   Only `loaded` contacts start the flow.

@@ -19,11 +19,9 @@ htmlcov/
 !.env.example
 *.pem
 *.key
+.hubspot_mcp_tokens.json
 
-# Data — real consultant lists never get committed
-data/*.xlsx
-data/*.csv
-!data/samples/
+# Runtime output — never committed
 logs/
 *.log
 
@@ -32,3 +30,6 @@ logs/
 Thumbs.db
 .vscode/
 .idea/
+
+# stale files this session could not delete (remove the folder yourself)
+_to_delete/

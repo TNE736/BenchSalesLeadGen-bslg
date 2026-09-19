@@ -1,0 +1,37 @@
+# Email Agent. Everything swappable lives here — never in code.
+
+model:
+  name: claude-sonnet-4-6        # Anthropic model id; key comes from ANTHROPIC_API_KEY
+  max_tokens: 1024
+  # No temperature setting: the Anthropic SDK removed it from messages.create.
+  # Emails differ because the leads differ.
+
+skill:
+  path: skills/outreach          # SKILL.md + assets/skills.json + references/ live here
+
+sender:
+  # Real values. The agent refuses to send if name, company, from_email or
+  # postal_address is blank.
+  name: "Stephen Miller"
+  title: "Bench Sales"
+  company: "Tek Ninjas"
+  from_email: "stephen@reply.tekninjas.com"   # must be on MAILGUN_DOMAIN
+  reply_to: "stephen.m@tekninjas.com"         # a real mailbox; replies land here
+  # CAN-SPAM requires a genuine physical address in every commercial email.
+  postal_address: "400 Stonebrook Pkwy, Ste 1103, Frisco, TX 75036"
+
+guards:
+  require_decision_maker: true   # re-check the property at send time
+  skip_if_status_in: [SENT, DELIVERED, OPENED, UNSUBSCRIBED]
+  contact_properties:            # what the agent reads from HubSpot; add a line when HubSpot gains a field
+    - firstname
+    - lastname
+    - email
+    - mobilephone
+    - technology
+    - title
+    - seniority
+    - visa_status
+    - decision_maker
+    - hs_email_optout
+    - email_status

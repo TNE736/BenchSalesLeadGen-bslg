@@ -1,0 +1,104 @@
+{
+  "_comment": "One file per technology. The lead's HubSpot `technology` picks the file, `title` picks the entry. Both are HubSpot dropdowns, so matching is exact. `description` and `involves` are BACKGROUND the model reads, not text copied into the email.",
+  "_sourced": "Researched 18 Sep 2026 from Salesforce official material (Trailhead role pages, credential pages, exam guides on help.salesforce.com, developer.salesforce.com), live 2026 postings on Dice/Indeed/ZipRecruiter, and SalesforceBen/ApexHours. See docs/STEPS.md step 8a for the corrections this turned up - several are things a practitioner would notice if we got them wrong.",
+  "technology": "Salesforce",
+  "reference": "salesforce.md",
+  "titles": {
+    "Salesforce Developer": {
+      "description": "Writes Apex classes and triggers, builds Lightning Web Components, and configures Flow automation against business requirements. Runs unit tests, debugs in sandboxes, and builds REST integrations to outside systems, working in sprints alongside admins and analysts.",
+      "involves": [
+        "Apex classes and triggers",
+        "Lightning Web Components",
+        "Flow automation",
+        "SOQL data queries",
+        "REST and SOAP integrations",
+        "Apex unit testing",
+        "Platform Developer I certification"
+      ]
+    },
+    "Salesforce Lead Developer": {
+      "description": "Sets the technical design for a Salesforce build and reviews the team's Apex and LWC as much as writing it. Owns integration architecture, governor limits, coding standards and the release process, estimates work, and unblocks the developers building alongside.",
+      "involves": [
+        "technical solution design",
+        "Apex code review",
+        "integration architecture",
+        "governor limits and scalability",
+        "CI/CD release management",
+        "mentoring and estimation",
+        "Platform Developer II certification"
+      ]
+    },
+    "Salesforce Architect": {
+      "description": "Designs the data model, security model and integration patterns for large orgs, then decides what gets solved with configuration and what needs Apex. Sets governance and deployment standards, and stays hands-on reviewing other people's builds.",
+      "involves": [
+        "enterprise data modelling",
+        "integration architecture and middleware",
+        "sharing and visibility design",
+        "configuration versus code decisions",
+        "release and deployment governance",
+        "Application or System Architect certification",
+        "multi-org and platform strategy"
+      ]
+    },
+    "Salesforce Administrator": {
+      "description": "Manages user access and permission sets, builds automation in Flow, and keeps data clean and reportable. Gathers requirements from business teams, builds reports and dashboards, and tests and rolls out each seasonal release.",
+      "involves": [
+        "Flow Builder automation",
+        "permission sets and permission set groups",
+        "reports and dashboards",
+        "data quality and Data Loader",
+        "requirements gathering and user training",
+        "sandbox and release readiness",
+        "Platform Administrator certification"
+      ]
+    },
+    "Salesforce Cloud": {
+      "description": "Builds and runs customer messaging in Marketing Cloud Engagement: audience segmentation with SQL against data extensions, email templates, and multi-step journeys. Day to day is personalisation scripting, deliverability checks and debugging failed sends.",
+      "involves": [
+        "Journey Builder orchestration",
+        "data extension SQL segmentation",
+        "AMPscript personalisation",
+        "Automation Studio scheduling",
+        "Email Studio and Content Builder",
+        "email deliverability and IP warming",
+        "Marketing Cloud Connect and APIs"
+      ]
+    },
+    "Salesforce Consultant": {
+      "description": "Runs discovery with stakeholders, turns requirements into user stories, and configures Salesforce declaratively. On CPQ work that extends to product bundles, price and product rules, discount schedules and quote templates, plus UAT and user training.",
+      "involves": [
+        "requirements gathering workshops",
+        "solution design with Flow",
+        "product bundle configuration",
+        "price rules and product rules",
+        "quote templates and discount schedules",
+        "contracting, amendments and renewals",
+        "UAT and user training"
+      ]
+    },
+    "Salesforce Business Analyst": {
+      "description": "Sits between business stakeholders and the build team: discovery sessions, current and future-state process maps, user stories with acceptance criteria, and UAT. Most also configure reports, flows and fields themselves rather than only documenting.",
+      "involves": [
+        "requirements gathering and documentation",
+        "business process mapping",
+        "user stories and acceptance criteria",
+        "stakeholder discovery workshops",
+        "UAT coordination",
+        "declarative Salesforce configuration",
+        "agile delivery in Jira or Azure DevOps"
+      ]
+    },
+    "Salesforce QA": {
+      "description": "Tests Salesforce orgs against business requirements - functional and regression runs across configuration and custom code, integration and API checks, and permission validation. Builds automated regression suites and re-tests before each seasonal release.",
+      "involves": [
+        "functional and regression testing",
+        "test plan and test case design",
+        "Provar or Copado Robotic Testing",
+        "Selenium and Playwright automation",
+        "API testing with Postman",
+        "CI/CD integration with Copado or Jenkins",
+        "seasonal release regression testing"
+      ]
+    }
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "_comment": "Maps every value found in HubSpot's legacy `technology` property onto the eight canonical `title` options. Agreed with Swaroop 18 Sep 2026. The ten values that are not job titles (bare 'Salesforce', resume fragments) map to Salesforce Developer by explicit decision - 87 contacts, ~29% of the list, are titled on a guess rather than on what their record says.",
+  "Salesforce Developer": [
+    "Salesforce Developer", "Salesforce Develoepr", "Salesforce Develope",
+    "Salesforce Engineer", "Salesforce Platform Developer",
+    "Salesforce Developer & Admin", "Salesforce Admin/Developer",
+    "Salesforce Developer/Admin", "Salesforce Admin/Dev",
+    "Salesforce Developer/Administrator", "Salesforce Administrator Developer",
+    "Salesforce Admin And Developer", "Sr. Salesforce Developer/Admin",
+    "Entry Level Salesforce Developer Administrator",
+    "Salesforce", "Senior Salesforce", "Salesforce CRM", "Salesforce Specialist",
+    "Salesforce, Java", "Salesforce, Java, .Net", "Salesforce, Java, QA, Oracle, C++",
+    "Salesforce (5 Years), ERP (SAP) 1 Year",
+    "Salesforce, 7Yearsyears Of Experience In SAP ABAP/SAP BW",
+    "Program Manager Business Analyst (SQL, JIRA, AWS, Hadoop, Spark, SQL, Salesforce"
+  ],
+  "Salesforce Lead Developer": [
+    "Senior Salesforce Developer", "Sr. Salesforce Developer", "Sr Salesforce Developer",
+    "Salesforce Lead Developer", "Lead Salesforce Developer",
+    "Senior Salesforce Developer | LWC Engineer", "Senior Salesforce Platform Engineer",
+    "Salesforce Technical Lead", "Salesforce Techno‑Functional Lead"
+  ],
+  "Salesforce Architect": [
+    "Salesforce Architect", "Salesforce Archetecth", "Salesforce Solution Architect",
+    "Salesforce Solution Architec", "Salesforce Technical Architect",
+    "Salesforce Technical Solution Architect", "Salesforce RCA Solution Architect",
+    "Salesforce Lead/Architect", "Salesforce Developerarchitect"
+  ],
+  "Salesforce Administrator": [
+    "Salesforce Admin", "Salesforce Administrator", "Senior Salesforce Administrator",
+    "Junior Salesforce Admin", "Salesforce Database Administrator"
+  ],
+  "Salesforce Cloud": [
+    "Salesforce Marketing Cloud", "Salesforce Marketing Cloud Developer",
+    "Salesforce Marketing Cloud Tech", "Salesforce Marketing Cloud & CRM",
+    "Salesforce Lightning, Marketing Cloud"
+  ],
+  "Salesforce Consultant": [
+    "Salesforce Consultant", "Senior Salesforce Consultant", "Salesforce Conultanta",
+    "Senior Salesforce Technical Consultant", "Salesforce CPQ"
+  ],
+  "Salesforce Business Analyst": [
+    "Salesforce Business Analyst", "Salesforce BA", "BA, Data Analyst, Salesforce"
+  ],
+  "Salesforce QA": [
+    "Salesforce Tester", "Salesforce, QA", "Senior Salesforcesharepoint QABA"
+  ]
+}

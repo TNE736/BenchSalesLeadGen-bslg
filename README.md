@@ -4,7 +4,8 @@ Email bench consultants about an open role, research the ones who reply, and han
 only genuinely qualified people to the Bench TA team.
 
 **Source design:** `docs/DESIGN_SOURCE.md` (Bench Outreach Pipeline, design doc v0.4,
-16 Sep 2026). Steps 1–6 are agreed; everything after is still under review.
+16 Sep 2026) — a **flow reference only**, not a spec. Each step is defined fresh at
+build time; standing decisions live at the top of `docs/STEPS.md`.
 
 **This is a new repository. LQABR is reference only** — nothing is copied from it
 without a decision recorded here first.
@@ -14,13 +15,11 @@ without a decision recorded here first.
 | Step | What it is | State |
 |---|---|---|
 | 0 | Repo skeleton | **done** |
-| 1 | Inputs: 300-row consultant sheet + 5 requisitions in HubSpot | not started |
-| 2 | Loader → HubSpot contacts, linked to requisitions | not started |
-| 3 | HubSpot → Gateway trigger, stage routing | not started |
-| 4 | Email Agent writes Email #1 | not started |
-| 5 | Email #1 sent through Mailgun | not started |
-| 6 | Mailgun notices + replies → Event Receiver → Gateway | not started |
-| 7+ | Reply meaning, reminder, research, Email #2, qualification, handoff | **design under review** |
+| 1 | Inputs: consultant list + requisitions in HubSpot | **done by hand** — new HubSpot account 247408852, contacts imported; see docs/STEPS.md |
+| 2 | Loader → HubSpot contacts | first load done by import; no requisition linking (dropped) |
+| 3 | Agent Gateway: `decision_maker = true` → webhook → gateway → hand-off | **built** — HubSpot webhook subscription still to be pointed at it |
+| 4 | HubSpot access via HubSpot's hosted MCP (`mcp.hubspot.com`) | **done** — consent run, verified live |
+| 5 | Email Agent — Claude works each lead with tools: reads the outreach skill, writes, sends | **built** — live sends verified; tool-loop redesign 19 Sep 2026 |
 
 Each step is agreed before it is built: task, inputs, expected outputs — verified
 against the design doc plus whatever has changed since.
@@ -28,19 +27,20 @@ against the design doc plus whatever has changed since.
 ## Layout
 
 ```
+skills/<name>/            SKILL.md + assets/ + references/ — read by the model on demand
 src/bench_outreach/
-  common/          shared types, stages, config, HubSpot/Mailgun clients
-  loader/          step 2 — Excel sheet -> HubSpot contacts
-  gateway/         step 3 — trigger ingress, decides which agent acts next
-  email_agent/     steps 4-5 — builds and sends Email #1 (later Email #2)
-  event_receiver/  step 6 — Mailgun notices and replies, signature-verified
-  research_agent/  step 7+ — matched skills and gaps (source still open)
-docs/              design source, step plans, open questions, ADRs
-tests/unit/        pytest, all external services mocked
-data/samples/      small synthetic fixtures only — never real consultant data
-config/            non-secret config
-scripts/           one-off operator scripts
+  email_agent/           receives the hand-off; the model reads the skill, writes, sends via tools
+  common/settings.py     .env loading
+  common/hubspot_mcp.py  the ONLY HubSpot access: MCP client for mcp.hubspot.com
+  gateway/               Agent Gateway — signature, events, router, dispatch, app
+config/gateway.yaml      routes: which property + value goes to which agent
+scripts/hubspot_auth.py  one-time HubSpot MCP consent (then agents run headless)
+scripts/fake_hubspot.py  fire a signed webhook at a local gateway
+docs/              design source (flow reference), as-built step log, open questions
+tests/unit/        pytest — offline, no credentials
 ```
+
+Packages for later steps are created when their step is agreed, not before.
 
 ## Getting started
 
@@ -50,11 +50,17 @@ pip install -r requirements-dev.txt
 pip install -e .
 cp .env.example .env        # fill in locally; never commit
 pytest
+
+# run the gateway
+cd src && uvicorn bench_outreach.gateway.app:app --port 8080
+# in another shell: send a signed test webhook
+python scripts/fake_hubspot.py --url http://localhost:8080
 ```
 
 ## Non-negotiables
 
 - HubSpot is the only system of record. No agent keeps lead state.
+- Agents reach HubSpot only through HubSpot's hosted MCP (`common/hubspot_mcp.py`).
 - Engagement is never fabricated — delivered/bounced/replied come only from
   Mailgun's signed notices.
 - Nobody is dropped silently: every unworkable consultant gets a written reason.

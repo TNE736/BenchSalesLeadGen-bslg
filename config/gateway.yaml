@@ -1,0 +1,28 @@
+# Agent Gateway routing. Edit this to change what triggers what — never the code.
+#
+# HubSpot fires the subscription on EVERY value of a watched property, so the
+# gateway filters here: an event whose property+value is not a route is
+# discarded (answered 200, logged) — that is normal, not an error.
+
+routes:
+  - id: decision-maker-yes
+    subscription_type: contact.propertyChange
+    property: decision_maker          # internal name of the "Decision Maker" contact property
+    values: ["Yes", "true"]           # case-insensitive
+    target: next_agent                # key under `targets`
+
+targets:
+  next_agent:
+    url_env: NEXT_AGENT_URL           # blank env = no agent yet; decisions go to the outbox file
+    # The email agent reads HubSpot, then the model works the lead in several turns
+    # (read the skill, the asset, the reference, send). One-shot compose measured
+    # 8-17s; the tool loop is 4-6 turns. A 10s timeout once fired mid-compose, the
+    # gateway retried, and a second email was drafted for the same person (17 Sep
+    # 2026). Keep this well above the agent's worst case.
+    timeout_seconds: 120
+    max_retries: 2                    # total attempts = 1 + max_retries; NOT applied to timeouts
+    backoff_seconds: 0.5
+
+dedupe:
+  ttl_seconds: 86400                  # HubSpot redelivers for up to 24h
+  max_entries: 10000
