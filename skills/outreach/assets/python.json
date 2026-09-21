@@ -1,0 +1,80 @@
+{
+  "_comment": "One file per technology. The key under `titles` is matched against HubSpot's `title` property, case-insensitively and exactly. `involves` phrases are copied into the email WORD FOR WORD by the guardrail in agent.py, so each one has to be a term a practitioner recognises instantly and has to read naturally inside a sentence.",
+  "_sourced": "Researched 21 Sep 2026 from the JetBrains/PSF State of Python 2025 survey, the Stack Overflow 2025 Developer Survey, framework and tool release notes, and live 2026 contract postings on Dice. Python is a language, not a product, so the titles are role-based: a backend engineer and an ML engineer share syntax and nothing else. Data Scientist was considered and rejected - 1,727 Dice postings but almost entirely full-time (SAIC, Booz Allen, Navy Federal); that contract demand has migrated into ML and GenAI reqs. ML Engineer and GenAI Engineer are kept separate on purpose: their vocabulary barely overlaps and one email for both misfires on both.",
+  "technology": "Python",
+  "reference": "python.md",
+  "titles": {
+    "Python Backend Developer": {
+      "description": "Builds and maintains HTTP services behind a load balancer, usually as containerised microservices. Most of the day is request and response plumbing, data validation, database queries and migrations, and background jobs. In contract work this is very often a modernisation seat.",
+      "involves": [
+        "FastAPI service development",
+        "Pydantic model validation",
+        "async endpoint design",
+        "SQLAlchemy 2.0 ORM work",
+        "Alembic schema migrations",
+        "Celery background task queues",
+        "OpenAPI contract design"
+      ]
+    },
+    "Data Engineer": {
+      "description": "Owns the pipelines from source systems into a warehouse or lakehouse, and the tests that keep them trustworthy. Gets paged when a load fails or a freshness target breaks. A large share of current contract work is migration off on-premise ETL tools and Hadoop estates.",
+      "involves": [
+        "Airflow DAG authoring",
+        "dbt model development",
+        "PySpark transformation jobs",
+        "Snowflake warehouse pipelines",
+        "medallion architecture design",
+        "slowly changing dimension modelling",
+        "data quality and freshness testing"
+      ]
+    },
+    "GenAI Engineer": {
+      "description": "Builds applications on top of foundation models rather than training them: retrieval over enterprise documents, agent workflows with tool calling, and the evaluation layer that makes them shippable. Day to day is retrieval quality, context design, and fighting latency and token cost.",
+      "involves": [
+        "RAG pipeline development",
+        "LangGraph agent orchestration",
+        "vector store retrieval tuning",
+        "embedding and chunking strategy",
+        "LLM evaluation harnesses",
+        "prompt and context engineering",
+        "guardrails and output validation"
+      ]
+    },
+    "ML Engineer": {
+      "description": "Takes models to production and keeps them there: training pipelines, feature engineering, registry and versioning, deployment as batch or real-time inference, and monitoring for drift. The deliverable is a running service with targets to meet, not an analysis.",
+      "involves": [
+        "model training pipelines",
+        "feature store engineering",
+        "MLflow experiment tracking",
+        "model registry and versioning",
+        "real-time inference serving",
+        "model drift monitoring",
+        "offline evaluation and A/B testing"
+      ]
+    },
+    "DevOps Engineer": {
+      "description": "Python here is the glue rather than the product. Writes infrastructure as code, builds and maintains delivery pipelines, automates cloud operations, and builds internal tooling so product teams can serve themselves. Often an infrastructure engineer first and a Python developer second.",
+      "involves": [
+        "Terraform module development",
+        "Ansible playbook automation",
+        "boto3 cloud automation scripting",
+        "Kubernetes operator development",
+        "GitHub Actions pipeline engineering",
+        "ArgoCD GitOps deployment",
+        "OpenTelemetry instrumentation"
+      ]
+    },
+    "QA Automation Engineer": {
+      "description": "Builds and maintains automated suites rather than running tests by hand, and wires them into delivery so they gate releases. At the senior end the job is framework architecture, test data strategy, and the long war against flaky tests.",
+      "involves": [
+        "pytest framework design",
+        "Playwright browser automation",
+        "API contract testing",
+        "CI test pipeline integration",
+        "test data management",
+        "flaky test remediation",
+        "performance testing with Locust"
+      ]
+    }
+  }
+}

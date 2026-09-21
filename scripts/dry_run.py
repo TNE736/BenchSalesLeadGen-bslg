@@ -21,7 +21,7 @@ sys.path.insert(0, str(REPO / "src"))
 
 from bench_outreach.common.hubspot_mcp import HubSpotMCPError, NotAuthorised  # noqa: E402
 from bench_outreach.common.settings import env                                # noqa: E402
-from bench_outreach.common.trace import Trace                                 # noqa: E402
+from bench_outreach.common.trace import Trace, new_trace_id                                 # noqa: E402
 from bench_outreach.email_agent.agent import EmailAgent, load_config          # noqa: E402
 from bench_outreach.email_agent.sender import DryRunSender                    # noqa: E402
 
@@ -42,7 +42,7 @@ def main() -> int:
         config["guards"]["skip_if_status_in"] = []
         config["guards"]["require_decision_maker"] = False
 
-    out = REPO / "logs" / "email_agent" / f"drafts-{date.today().isoformat()}.md"
+    out = REPO / "artifacts" / "email_agent" / f"drafts-{date.today().isoformat()}.md"
     try:
         agent = EmailAgent(sender=DryRunSender(out), config=config, dry_run=True)
     except ValueError as exc:
@@ -52,7 +52,7 @@ def main() -> int:
     print(f"contact {args.object_id}  ·  model {config['model']['name']}  ·  DRY RUN\n")
     started = time.perf_counter()
     try:
-        t = Trace("email_agent", f"dry-{args.object_id}",
+        t = Trace("email_agent", new_trace_id(),
                   f"Dry run   lead {args.object_id}", REPO / "logs" / "email_agent")
         outcome = agent.work(args.object_id, trigger_id="dry-run", t=t)
         t.end(f"{outcome.status} — {outcome.reason}", **outcome.as_dict())

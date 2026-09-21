@@ -79,7 +79,7 @@ def test_yes_is_handed_off_with_trigger_and_contact_id(env):
     body = r.json()
     assert body["routed"] == 1 and body["handed_off"] == 1
     assert agent.received[0]["object_id"] == "555"
-    assert agent.received[0]["trigger_id"].startswith("trg-")
+    assert agent.received[0]["trigger_id"].startswith("bslg-")
 
 
 def test_no_is_discarded_and_still_200(env):

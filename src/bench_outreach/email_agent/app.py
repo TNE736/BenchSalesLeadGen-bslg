@@ -18,8 +18,9 @@ from fastapi.responses import JSONResponse
 
 from ..common.hubspot_mcp import HubSpotMCPError
 from ..common.settings import REPO_ROOT, env, env_bool
-from ..common.trace import ARROW, Trace, banner
-from .agent import EmailAgent, Outcome, check_sender_identity, check_skill_files, load_config
+from ..common.trace import ARROW, Trace, banner, new_trace_id
+from .agent import (ARTIFACTS, EmailAgent, Outcome, check_sender_identity,
+                    check_skill_files, load_config)
 from .sender import DryRunSender, MailgunSender
 
 CONFIG_PATH = REPO_ROOT / "config" / "email.yaml"
@@ -39,7 +40,7 @@ def build_agent(config: dict[str, Any], dry_run: bool) -> tuple[EmailAgent | Non
             problems.append("sender identity incomplete: " + ", ".join(missing))
     if not env("ANTHROPIC_API_KEY"):
         problems.append("ANTHROPIC_API_KEY is not set")
-    sender = (DryRunSender(LOG_DIR / f"drafts-{date.today().isoformat()}.md")
+    sender = (DryRunSender(ARTIFACTS / f"drafts-{date.today().isoformat()}.md")
               if dry_run else MailgunSender())
     try:
         agent = EmailAgent(sender=sender, config=config, dry_run=dry_run)
@@ -86,7 +87,9 @@ def create_app(config: dict[str, Any] | None = None, agent: EmailAgent | None = 
             return JSONResponse(status_code=503,
                                 content={"error": "agent not configured", "problems": problems})
 
-        t = Trace("email_agent", trigger_id or f"lead-{object_id}",
+        # The gateway's trigger id IS the trace id, so both services' lines join on
+        # it. A direct POST (no gateway) mints its own rather than inventing a shape.
+        t = Trace("email_agent", trigger_id or new_trace_id(),
                   f"Gateway {ARROW} Email Agent   lead {object_id}", LOG_DIR)
         try:
             outcome = await run_in_threadpool(agent.work, object_id, trigger_id, t)
@@ -114,7 +117,7 @@ def _log_startup(agent: EmailAgent | None, config: dict[str, Any], dry_run: bool
                  problems: list[str]) -> None:
     """One SYSTEM line at boot naming the skills this process offers the model."""
     catalogue = agent.catalogue if agent else []
-    Trace("email_agent", "startup", "Email Agent starting", LOG_DIR).system(
+    Trace("email_agent", new_trace_id(), "Email Agent starting", LOG_DIR).system(
         "skill_loaded", f"{len(catalogue)} skill(s) in the catalogue: "
         + ", ".join(s.name for s in catalogue),
         dry_run=dry_run, model=config["model"]["name"],

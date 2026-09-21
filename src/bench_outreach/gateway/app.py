@@ -14,10 +14,6 @@ Response codes are HubSpot's control signal:
 from __future__ import annotations
 
 import json
-import logging
-import sys
-import time
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -26,48 +22,19 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from ..common.settings import REPO_ROOT, env, env_bool
-from ..common.trace import ARROW, INFO, SYSTEM, Trace, banner, redact
+from ..common.trace import ARROW, AUDIT, INFO, Trace, banner, new_trace_id
 from .dispatch import Dispatcher
 from .events import EnvelopeError, parse_batch
 from .router import Router, RoutingConfig
 from .signature import SignatureError, verify_v3
 
 CONFIG_PATH = REPO_ROOT / "config" / "gateway.yaml"
+#: The outbox is an ARTIFACT, not a log: a decision parked for later because no agent
+#: URL was configured. It is work waiting to be done, and it carries a contact id, so
+#: it belongs beside the email agent's drafts and transcripts rather than among the
+#: three machine-readable streams. logs/ holds those three files and nothing else.
+ARTIFACTS = REPO_ROOT / "artifacts" / "gateway"
 INGRESS_PATH = "/hubspot/events"
-
-
-# ------------------------------------------------------------------ logging
-def _logger(log_dir: Path) -> logging.Logger:
-    """One JSON object per line, to stdout and to logs/gateway/gateway.jsonl."""
-    log = logging.getLogger("bench_outreach.gateway")
-    if log.handlers:
-        return log
-    log.setLevel(logging.INFO)
-    log.propagate = False
-    fmt = logging.Formatter("%(message)s")
-    stream = logging.StreamHandler(sys.stdout)
-    stream.setFormatter(fmt)
-    log.addHandler(stream)
-    try:
-        log_dir.mkdir(parents=True, exist_ok=True)
-        file = logging.FileHandler(log_dir / "gateway.jsonl", encoding="utf-8")
-        file.setFormatter(fmt)
-        log.addHandler(file)
-    except OSError:
-        pass
-    return log
-
-
-def _emit(log: logging.Logger, event: str, **fields: Any) -> None:
-    """A SYSTEM record: about the service, not about any one lead.
-
-    Carries `service` and `stream` like every Trace record, so one reader can make
-    sense of both files. Without them these lines were the only ones in either log
-    that no filter could select.
-    """
-    log.info(json.dumps({"ts": int(time.time() * 1000), "service": "gateway",
-                         "stream": SYSTEM, "event": event, **redact(fields)},
-                        default=str))
 
 
 # --------------------------------------------------------------------- app
@@ -78,9 +45,8 @@ def create_app(
 ) -> FastAPI:
     config = config or RoutingConfig.load(CONFIG_PATH)
     log_dir = log_dir or (REPO_ROOT / "logs" / "gateway")
-    log = _logger(log_dir)
     router = Router(config)
-    dispatcher = dispatcher or Dispatcher(config.targets, log_dir / "outbox.jsonl")
+    dispatcher = dispatcher or Dispatcher(config.targets, ARTIFACTS / "outbox.jsonl")
 
     skip_signature = env_bool("GATEWAY_SKIP_SIGNATURE")      # local dev only
 
@@ -110,8 +76,8 @@ def create_app(
         return JSONResponse(status_code=200 if not problems else 503, content=body)
 
     def process(raw: bytes, method: str, uri: str, headers: dict[str, str],
-                run_id: str, source_ip: str) -> tuple[int, dict[str, Any]]:
-        with Trace("gateway", run_id, "HubSpot webhook received", log_dir) as t:
+                trace_id: str, source_ip: str) -> tuple[int, dict[str, Any]]:
+        with Trace("gateway", trace_id, "HubSpot webhook received", log_dir) as t:
             # ---- 1. did this really come from HubSpot? -----------------------
             t.step(f"HubSpot {ARROW} Gateway   from {source_ip}")
             t.detail(f"addressed to {uri}")
@@ -126,10 +92,13 @@ def create_app(
                         signature=headers.get("x-hubspot-signature-v3", ""),
                     )
                     t.ok("signature verified — this is genuinely from HubSpot")
+                    t.event("signature_verified", stream=AUDIT, source_ip=source_ip)
                 except SignatureError as exc:
                     t.fail(f"signature rejected: {exc}")
+                    t.event("signature_rejected", stream=AUDIT, source_ip=source_ip,
+                            reason=str(exc))
                     t.end("REJECTED 401 — nothing was routed", status=401)
-                    return 401, {"run_id": run_id, "error": "unauthorized"}
+                    return 401, {"error": "unauthorized"}
 
             # ---- 2. is the envelope well formed? ----------------------------
             try:
@@ -137,11 +106,11 @@ def create_app(
             except json.JSONDecodeError:
                 t.fail("body is not valid JSON")
                 t.end("REJECTED 400", status=400)
-                return 400, {"run_id": run_id, "error": "invalid JSON body"}
+                return 400, {"error": "invalid JSON body"}
             except EnvelopeError as exc:
                 t.fail(str(exc))
                 t.end(f"REJECTED {exc.status_code}", status=exc.status_code)
-                return exc.status_code, {"run_id": run_id, "error": str(exc)}
+                return exc.status_code, {"error": str(exc)}
             t.ok(f"{len(events)} event(s) in this delivery")
 
             # ---- 3. which of them do we act on? -----------------------------
@@ -170,19 +139,28 @@ def create_app(
                          f"+ trigger {decision.trigger_id} (no personal data)")
                 router.dedupe.remember(decision.event.event_id)   # reserve before handing off
                 outcome = dispatcher.send(decision)
+                # The same shape every other hop uses, so "show me every external call
+                # this trace made" is one query across both services. It is also what
+                # makes a hand-off timeout legible: HubSpot gives us 5 seconds and the
+                # agent can take 20, and that used to be a line of prose.
+                t.outbound_call(service="email_agent", endpoint=url, ok=outcome.ok,
+                                status=outcome.status_code, duration_ms=outcome.latency_ms,
+                                params={"trigger_id": decision.trigger_id,
+                                        "object_id": decision.event.object_id,
+                                        "attempts": outcome.attempts},
+                                error=outcome.error or "")
                 if outcome.ok:
                     t.ok(f"agent accepted it — HTTP {outcome.status_code} in "
-                         f"{outcome.latency_ms / 1000:.1f}s (attempt {outcome.attempts})",
-                         **outcome.as_dict())
+                         f"{outcome.latency_ms / 1000:.1f}s (attempt {outcome.attempts})")
                 else:
                     router.dedupe.forget(decision.event.event_id)  # let HubSpot retry
                     t.fail(f"hand-off failed after {outcome.attempts} attempt(s): "
-                           f"{outcome.error}", **outcome.as_dict())
+                           f"{outcome.error}")
                 outcomes.append(outcome)
 
             failed = [o for o in outcomes if not o.ok]
             summary = {
-                "run_id": run_id, "received": len(events), "routed": len(result.decisions),
+                "received": len(events), "routed": len(result.decisions),
                 "discarded": len(result.discards), "handed_off": len(outcomes) - len(failed),
                 "failed": len(failed), "routing_errors": result.errors,
                 "handoffs": [o.as_dict() for o in outcomes],
@@ -198,28 +176,40 @@ def create_app(
 
     @app.post(INGRESS_PATH)
     async def hubspot_events(request: Request) -> Response:
-        run_id = uuid.uuid4().hex[:12]
         raw = await request.body()
+        # The id of this DELIVERY, not of the work it asks for. Two deliveries of one
+        # event are two HTTP requests and get two ids -- the timestamp alone differs,
+        # and that is the point: the signature, the source IP and the verdict belong
+        # to the request that carried them. The work is joined by the trigger id the
+        # router mints per event (`mint_trigger_id`), which the email agent adopts.
+        trace_id = new_trace_id(raw.decode("utf-8", "replace") if raw else "")
         headers = {k.lower(): v for k, v in request.headers.items()}
         source_ip = request.client.host if request.client else "unknown"
         status, body = await run_in_threadpool(
-            process, raw, request.method, _signed_uri(request), headers, run_id, source_ip)
+            process, raw, request.method, _signed_uri(request), headers, trace_id, source_ip)
         return JSONResponse(status_code=status, content=body)
 
     problems = config_problems()
     banner("Agent Gateway", [
         f"listening for HubSpot at  {INGRESS_PATH}",
         f"public URL (what HubSpot signs)  {env('GATEWAY_PUBLIC_URL') or '(not set)'}",
-        f"routes  " + ", ".join(f'{r.property}={list(r.values)} {ARROW} {r.target}'
+        "routes  " + ", ".join(f'{r.property}={list(r.values)} {ARROW} {r.target}'
                                 for r in config.routes),
         "hands off to  " + ", ".join(
             f"{k} {ARROW} {dispatcher.url_for(k) or '(no agent — outbox file)'}"
             for k in config.targets),
         f"signature check  {'DISABLED (local dev)' if skip_signature else 'on'}",
-        f"log file  logs/gateway/gateway.jsonl",
+        "log file  logs/gateway/{system,process,audit}.jsonl",
     ] + ([f"PROBLEM: {k}: {v}" for k, v in problems.items()] or ["config  ok"]))
-    _emit(log, "startup", ingress=INGRESS_PATH, routes=[r.id for r in config.routes],
-          config_problems=problems)
+    # Through Trace, like the email agent, so it lands in logs/gateway/system.jsonl.
+    # It used to go through a second logger of the gateway's own into gateway.jsonl:
+    # the record was tagged stream=system and then written to the one file no stream
+    # filter could reach.
+    Trace("gateway", new_trace_id(), "Agent Gateway starting", log_dir).system(
+        "startup", f"{len(config.routes)} route(s): "
+        + ", ".join(r.id for r in config.routes),
+        ingress=INGRESS_PATH, routes=[r.id for r in config.routes],
+        config_problems=problems)
     return app
 
 

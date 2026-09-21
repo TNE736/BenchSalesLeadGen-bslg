@@ -85,7 +85,9 @@ to another who happens to be busy.
    `Salesforce Architect requirement` is the right register. You may instead lead
    with the work if it is sharper — `Salesforce Architect — data model and
    integration` — but never both a role and a hook stapled together.
-2. **Greeting.** First name only. No "Dear", no "Hope this finds you well".
+2. **Greeting.** `Hi <first name>,` — always. Their first name alone on the line
+   reads as a summons, not a greeting. No "Dear", no "Hello", no "Hope this finds
+   you well", no surname, no title.
 3. **The opening.** Say we have a requirement open for their role. Do **not**
    repeat the technology if the title already contains it: "a Salesforce Architect
    requirement in Salesforce" reads as a machine wrote it. Just "a Salesforce
@@ -96,11 +98,13 @@ to another who happens to be busy.
    closely with what it needs" as a claim about them — it is an empty sentence and
    it is the exact phrasing every recruiter uses. Anchor it in what you actually
    know: their title, their level, the field they work in.
-5. **The work — this is the paragraph that earns the reply.** Two or three concrete
-   things the role involves, taken from the role material you were given. Use their
-   vocabulary. A Salesforce Architect should read "sharing and visibility" and
-   "config versus Apex" and think *this person has done this*. Vague beats wrong,
-   but specific beats both.
+5. **The work — this is the paragraph that earns the reply.** Two to four phrases
+   from the role material's `involves` list, **copied exactly as written**. Pick the
+   ones that fit the sentence you are building; do not reword them, re-order the
+   words inside a phrase, shorten them or change their singular or plural, and do
+   not name a capability that is not on the list. Everything around them is yours.
+   An Architect should read "sharing and visibility design" and think *this person
+   has done this*. See **Phrases you may not change** below.
 6. **The ask — one line, easy to answer.** Nothing more: no calendar link, no resume
    request, no list of questions, no "let me know your availability, rate and visa
    status".
@@ -122,6 +126,30 @@ time.
 This is not a stylistic preference. Identical phrasing repeated across a few hundred
 messages from one domain is what spam filters are built to catch, and it is what makes
 two consultants comparing notes realise neither of them was written to.
+
+**This does not apply to the `involves` phrases.** Vary the opening, the subject, the
+closing, the sentence order and the length — never a phrase from the role material.
+Those are the one part of the email that must read identically every time, and "the
+words are yours" stops at them.
+
+## Phrases you may not change
+
+The `involves` list in the role material is not a hint. It is the vocabulary this
+consultant uses for their own work, and it goes into the email character for
+character.
+
+- Use between **two and four** of them.
+- Copy each one **exactly** — same words, same order, same singular or plural.
+- Do not invent a capability that is not on the list, however plausible it sounds.
+- Build your own sentences around them. The prose is yours; the phrases are not.
+
+For a Salesforce Cloud lead the list gives you `data extension SQL segmentation`.
+Write "the work is heavy on data extension SQL segmentation" — not "SQL segmentation
+against data extensions", which is the same idea in different words and is exactly
+what this rule exists to stop.
+
+A draft that rewords them is not sent. It comes back to you once, naming the phrases
+you changed, and you rewrite it.
 
 ## Rules
 
@@ -174,7 +202,7 @@ Stephen Miller
 ```
 Subject: Salesforce BA — discovery and process work
 
-Anita,
+Hi Anita,
 
 A Salesforce Business Analyst requirement has come up, and I wanted to put it in
 front of someone actually doing that work rather than post it and hope.

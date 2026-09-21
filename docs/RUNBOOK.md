@@ -204,7 +204,7 @@ python scripts\logs.py --full               # EVERYTHING: timeline + prompt + em
 python scripts\logs.py --trace              # one lead end to end, both services
 python scripts\logs.py                      # the last run, in full
 python scripts\logs.py --runs               # every run, one line each
-python scripts\logs.py --run trg-5a748b     # one run (a prefix is enough)
+python scripts\logs.py --run bslg-20260921T1103  # one run (a prefix is enough)
 python scripts\logs.py --lead 551358867185  # every run for one contact
 python scripts\logs.py --system             # SYSTEM only: startup, config, loaded
 python scripts\logs.py --process            # PROCESS only: decisions per lead
@@ -216,10 +216,13 @@ python scripts\logs.py --raw                # the JSON itself
 
 `--trace` is the one to reach for after a real run. The gateway and the email
 agent write separate files and number their work differently — the gateway's run
-id covers a whole webhook *delivery*, while the trigger id it mints (`trg-...`)
-follows one *lead*, and the email agent adopts that as its own run id. `--trace`
-joins on the trigger id, so the hand-off between the two services is visible in a
-single timeline: signature check, routing decision, then all five agent steps.
+id covers a whole webhook *delivery*, while the trigger id it mints follows one
+*lead*, and the email agent adopts that as its own trace id. Both are
+`bslg-<utc timestamp>-<12 hex>`; the trigger id is seeded from HubSpot's event
+identity and timestamped from the event's own `occurred_at`, so a redelivery
+reproduces it exactly. `--trace` joins on the trigger id, so the hand-off between
+the two services is visible in a single timeline: signature check, routing
+decision, then all five agent steps.
 
 ### Changing what the model is told
 
@@ -247,6 +250,56 @@ of the things a skill can override. Putting it under `skills\\` would also mean
 `skill_catalogue()` eventually offering the agent its own system prompt as a skill
 to go and read. `skills\\` holds skill directories and nothing else; a test
 enforces that.
+
+### Where the log files are
+
+Three files per service, not one — the shape LQABR's research agent uses:
+
+```
+logs\email_agent\      system.jsonl   process.jsonl   audit.jsonl
+logs\gateway\          system.jsonl   process.jsonl   audit.jsonl
+
+artifacts\email_agent\      drafts-2026-09-21.md
+artifacts\email_agent\runs\ bslg-20260921T094900-a1b2c3d4e5f6.md
+artifacts\gateway\          outbox.jsonl
+```
+
+**`logs\` holds three files per service and nothing else.** Logs are machine
+records, rotatable, and carry no personal data. Drafts and run transcripts are
+products of a run, are meant to be read by a person, and **do** carry a lead's name
+and address — so they live under `artifacts\`, which is gitignored for that reason.
+Mixing the two in one folder is what makes "can I delete this?" unanswerable.
+
+The gateway's `outbox.jsonl` is there for the same reason: it is a decision parked
+because no agent URL was configured — work waiting to be done, carrying a contact
+id. Not a log record.
+
+`scripts\logs.py` reads all three and merges them by time, so you only name a
+stream when you want just that one.
+
+### The trace id
+
+One shape across every service and every entry point:
+
+```
+bslg-20260920T190701-c5f1fdc17901
+ |         |              |
+ |         |              +-- 12 hex
+ |         +-- UTC timestamp
+ +-- project id (BENCH_PROJECT_ID, default bslg)
+```
+
+It replaced `run_id`, which had four different shapes — `dry-553374486245`,
+`livetest-1`, `trg-5a748b8752c0`, `startup` — none of which could be searched for
+together. `run_id` is now gone entirely: it survived for a while as a duplicate of
+`trace_id` on the gateway's `run_finished` line and in the JSON the gateway hands
+back to HubSpot, and both have been removed. HubSpot reads only the status code —
+it discards the body — so that copy was being written for nobody.
+
+Two ids remain, and they answer different questions. `trace_id` is on every line:
+*which run wrote this?* `trigger_id` is minted per event by the router and adopted
+by the email agent as its own `trace_id`: *which lead is this about?* One webhook
+delivery is one `trace_id`; the work it starts follows the `trigger_id`.
 
 ### The three kinds of log
 
@@ -310,7 +363,7 @@ The `.jsonl` deliberately holds no prose — only shas and counts — because a 
 name and address must not sit in a line that gets grepped or pasted. But a sha
 cannot answer *"why did this person get these words?"*.
 
-So every run also writes `logs\email_agent\runs\<run_id>.md`, containing three
+So every run also writes `artifacts\email_agent\runs\<trace_id>.md`, containing three
 sections: the **prompt sent to the model**, its **raw reply**, and the **email as
 sent** with the footer. `--full` prints them under the timeline. The JSONL records
 only the path, in `prompt_file`, `reply_file` and `sent_file`.
@@ -330,10 +383,10 @@ ever stops being acceptable — then only the shas remain.
 | `step` | process | which of the five steps we are in |
 | `outbound_call` | audit | one per call to HubSpot, Anthropic or Mailgun: status, duration, tokens |
 | `contact_read` | process | which properties HubSpot returned and which were empty |
-| `guards_passed` | process | the actual value each guard judged, and whether it was switched on |
-| `guard_stopped` | process | which guard stopped it, and the value that did it |
-| `hubspot_write_skipped` | process | a claim we chose not to write, and why |
-| `status_written` | process | the value written back to `email_status` |
+| `guards_passed` | audit | the actual value each guard judged, and whether it was switched on |
+| `guard_stopped` | audit | which guard stopped it, and the value that did it |
+| `hubspot_write_skipped` | audit | a claim we chose not to write, and why |
+| `status_written` | audit | the value written back to `email_status` |
 | `skill_selected` | process | technology, title, description, involves, and four shas: skill, asset, reference, prompt |
 | `model_reply` | process | model, reply length, reply sha, transcript path |
 | `draft` | process | subject in full, body length and sha |
