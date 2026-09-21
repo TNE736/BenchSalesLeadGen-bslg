@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 import pytest
@@ -54,7 +55,7 @@ def test_decision_carries_object_id_and_stable_trigger_id():
     d = res.decisions[0]
     assert d.handoff_payload()["object_id"] == "101"
     assert d.trigger_id == mint_trigger_id(HubSpotEvent.from_payload(_event()))
-    assert d.trigger_id.startswith("trg-")
+    assert d.trigger_id.startswith("bslg-")
 
 
 def test_missing_object_id_is_a_routing_error_not_a_discard():
@@ -102,3 +103,33 @@ def test_envelope_validation(payload, status):
         with pytest.raises(EnvelopeError) as exc:
             parse_batch(payload)
         assert exc.value.status_code == status
+
+
+def test_the_trigger_id_is_a_trace_id_so_both_services_share_one_string():
+    """A real run left the gateway on `bslg-20260921T110330-1d0bbe9dd3dd` and the
+    email agent on `trg-5a169f51a5f6`. Nothing joined them. The trigger id the agent
+    adopts must be the project's one id shape, not a format of its own."""
+    trigger = mint_trigger_id(HubSpotEvent.from_payload(_event()))
+    assert trigger.startswith("bslg-"), trigger
+    project, stamp, tail = trigger.split("-")
+    assert len(stamp) == len("20260921T110330") and stamp[8] == "T"
+    assert len(tail) == 12 and all(c in "0123456789abcdef" for c in tail)
+
+
+def test_a_redelivery_reproduces_the_trigger_id_exactly():
+    """HubSpot retries. Two deliveries of one event eleven seconds apart used to mint
+    two different ids, because the clock was part of the string — the retry read as
+    new work. The timestamp comes from the event's own `occurredAt`, so it cannot."""
+    payload = _event()
+    first = mint_trigger_id(HubSpotEvent.from_payload(payload))
+    time.sleep(1.1)                       # the clock moves; the event does not
+    retry = dict(payload, attemptNumber=3)
+    assert mint_trigger_id(HubSpotEvent.from_payload(retry)) == first
+
+
+def test_a_different_event_still_gets_a_different_id():
+    """The reproducibility above must not collapse distinct events onto one id:
+    same portal, same instant, different contact."""
+    a = mint_trigger_id(HubSpotEvent.from_payload(_event(eventId=1, objectId=101)))
+    b = mint_trigger_id(HubSpotEvent.from_payload(_event(eventId=2, objectId=102)))
+    assert a != b

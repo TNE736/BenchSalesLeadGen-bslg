@@ -23,6 +23,9 @@ htmlcov/
 
 # Runtime output — never committed
 logs/
+# Run artifacts: drafts and per-run transcripts. These DO carry a lead's name
+# and email address, so they never leave the machine that produced them.
+artifacts/
 *.log
 
 # OS / editor

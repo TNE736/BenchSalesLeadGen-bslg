@@ -8,7 +8,7 @@ Every service writes the same two things:
   * **file** — the same events as JSON lines, one per line, for grepping and later
     analysis. `logs/<service>/<service>.jsonl`.
 
-Both carry the same `run_id`, and every hop carries the `trigger_id` the gateway
+Both carry the same `trace_id`, and every hop carries the `trigger_id` the gateway
 minted, so one lead can be followed across two services and two files.
 
 Set `BENCH_LOG_FORMAT=json` to make the console emit JSON too (for Cloud Run and
@@ -17,12 +17,14 @@ friends, where a log collector reads stdout and nobody is watching).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 import sys
 import time
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -83,7 +85,7 @@ _SAFE_KEYS = ("tokens", "max_tokens", "input_tokens", "output_tokens",
 #:
 #: Exact matches only, no suffix matching: a new id field is added here on
 #: purpose, so nobody widens the hole by naming a variable `..._id`.
-_IDENTIFIER_KEYS = ("message_id", "run_id", "trigger_id", "object_id")
+_IDENTIFIER_KEYS = ("message_id", "trace_id", "trigger_id", "object_id")
 
 _EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}")
 #: A run of digits carrying phone punctuation. Matched loosely, then checked:
@@ -96,6 +98,17 @@ _PHONE = re.compile(r"\+?\d[\d\s().-]{5,}\d")
 #: one. `drafts-2026-09-18.md` became `drafts-<redacted>.md` until this was added.
 #: A log that loses its dates loses the thing people search it by.
 _DATEISH = re.compile(r"\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}")
+#: ...nor is an IP address, which has the digits and the separators to look like one.
+#: `216.157.40.54` came out as <redacted> on a signature_verified record — the one
+#: field a security audit line exists to carry.
+_IPISH = re.compile(r"\d{1,3}(\.\d{1,3}){3}")
+#: ...and neither is one of our own trace ids, which is the worst loss of the three:
+#: `bslg-20260921T113233-5c066ab10e87` came out as `bslg-20260921T<redacted>c066ab10e87`
+#: because `113233-5` on its own is seven digits and a hyphen. The id is the string the
+#: whole log is joined by. This runs BEFORE the phone scan and its matches pass through
+#: untouched, because the damage is done to a SLICE of the id, not to the whole value --
+#: a guard that only checks complete values, like the two above, cannot see it.
+_TRACEISH = re.compile(r"[a-z][a-z0-9_]*-\d{8}T\d{6}-[0-9a-f]{12}")
 
 REDACTED = "<redacted>"
 
@@ -117,6 +130,33 @@ REDACTED = "<redacted>"
 # what it PRODUCED, system records what the service IS. So token counts are audit,
 # the email's subject is process, and the loaded skill's sha is system.
 SYSTEM, PROCESS, AUDIT = "system", "process", "audit"
+
+#: Prefix on every trace id. One project, one prefix, so a line pulled out of a
+#: shared log still says which system produced it.
+PROJECT_ID = env("BENCH_PROJECT_ID") or "bslg"
+
+
+def new_trace_id(seed: str = "", at: float | None = None) -> str:
+    """`<project>-<utc timestamp>-<12 hex>` — one shape across all four services.
+
+    The ids used to be minted per entry point and looked it: `dry-553374486245`,
+    `livetest-1`, `trg-5a748b8752c0`, `startup`. Four shapes meant no single query
+    could follow a lead from the HubSpot webhook through to Mailgun.
+
+    `seed` fixes the suffix and `at` fixes the timestamp. BOTH are needed for a
+    reproducible id: seeding alone is not enough, because the clock moves between a
+    delivery and its retry and the timestamp is part of the string. That was a real
+    bug — two deliveries of one HubSpot event minted two different ids eleven
+    seconds apart, and the retry looked like new work.
+
+    Without a seed the suffix is random, which is what a dry run or a startup wants.
+    """
+    when = (datetime.fromtimestamp(at / 1000, timezone.utc) if at
+            else datetime.now(timezone.utc))
+    stamp = when.strftime("%Y%m%dT%H%M%S")
+    tail = (hashlib.sha1(seed.encode()).hexdigest()[:12] if seed
+            else uuid.uuid4().hex[:12])
+    return f"{PROJECT_ID}-{stamp}-{tail}"
 STREAMS = (SYSTEM, PROCESS, AUDIT)
 
 
@@ -128,10 +168,20 @@ def _is_secret_key(key: str) -> bool:
 
 
 def _looks_like_a_phone(text: str) -> bool:
-    if _DATEISH.fullmatch(text.strip()):
+    if _DATEISH.fullmatch(text.strip()) or _IPISH.fullmatch(text.strip()):
         return False
     return (sum(c.isdigit() for c in text) >= 7
             and (text.startswith("+") or any(c in " ().-" for c in text)))
+
+
+#: Trace ids first, so a phone-shaped slice of one is never offered to the test above.
+_PHONE_SCAN = re.compile(f"(?P<trace>{_TRACEISH.pattern})|(?P<phone>{_PHONE.pattern})")
+
+
+def _blank_if_phone(match: re.Match[str]) -> str:
+    if match.lastgroup == "trace":
+        return match.group()
+    return REDACTED if _looks_like_a_phone(match.group()) else match.group()
 
 
 def _scrub(value: Any, depth: int = 0) -> Any:
@@ -140,9 +190,7 @@ def _scrub(value: Any, depth: int = 0) -> Any:
         return value
     if isinstance(value, str):
         cleaned = _EMAIL.sub(REDACTED, value)
-        cleaned = _PHONE.sub(
-            lambda m: REDACTED if _looks_like_a_phone(m.group()) else m.group(),
-            cleaned)
+        cleaned = _PHONE_SCAN.sub(_blank_if_phone, cleaned)
         return cleaned
     if isinstance(value, dict):
         return redact(value, depth + 1)
@@ -165,6 +213,28 @@ def redact(fields: dict[str, Any], depth: int = 0) -> dict[str, Any]:
     return out
 
 
+def _summarise(fields: dict[str, Any], width: int = 68) -> str:
+    """The fields that make an audit line worth reading, on one line.
+
+    Redacted like everything else: these carry values judged about a person, and a
+    console is as easy to paste into a ticket as a log file is.
+    """
+    parts = []
+    for k, v in redact(fields).items():
+        if v in ("", None, [], {}):
+            continue
+        if isinstance(v, (list, tuple)):
+            v = f"[{len(v)}]"
+        parts.append(f"{k}={v}")
+    line, kept = "", []
+    for part in parts:                      # whole fields only: a half-printed
+        if len(line) + len(part) + 2 > width:   # value reads like a bug
+            break
+        kept.append(part)
+        line = "  ".join(kept)
+    return line + ("  ..." if len(kept) < len(parts) else "")
+
+
 def _clock() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
@@ -172,16 +242,17 @@ def _clock() -> str:
 class Trace:
     """One run's log. Use as a context manager so the box always closes."""
 
-    def __init__(self, service: str, run_id: str, title: str,
+    def __init__(self, service: str, trace_id: str, title: str,
                  log_dir: Path | None = None) -> None:
         self.service = service
-        self.run_id = run_id
+        self.trace_id = trace_id
         self.started = time.perf_counter()
-        self._log = _logger(service, log_dir)
+        self._log_dir = log_dir
+        self._logs: dict[str, logging.Logger] = {}
         self._json_console = env("BENCH_LOG_FORMAT").lower() == "json"
         self._bound: dict[str, Any] = {}
         self._steps = 0
-        self._console(f"{TOP} {title}   run {run_id}")
+        self._console(f"{TOP} {title}   trace {trace_id}")
         self._console(f"{MID} unmarked = process (work on this lead)   "
                       f"{OUT} AUDIT = a call that left us   {OUT} SYSTEM = the service")
         self._record("run_started", title=title)
@@ -231,13 +302,19 @@ class Trace:
             self._record("detail", detail=text, **fields)
 
     def event(self, name: str, stream: str = PROCESS, **fields: Any) -> None:
-        """A machine-readable event with no console line of its own.
+        """A machine-readable event.
 
-        For the things a person does not need narrated but an auditor does: the
-        model call, a HubSpot write, the skill and asset actually used. Before
-        this existed, services kept a second `_emit` helper beside Trace and every
-        event had to be written twice, in two styles, at two call sites.
+        A PROCESS event has no console line: the step and ok/warn/fail lines around
+        it already narrate the work, and repeating it would double every run.
+
+        An AUDIT event does print. The header promises the reader that AUDIT lines
+        are marked, and until this was added only outbound_call kept that promise —
+        the decisions (who was allowed through, what we changed, what we refused)
+        went to the file and nowhere else, so the terminal showed the stream's cost
+        half and hid its accountability half.
         """
+        if stream == AUDIT:
+            self._console(f"{MID}{OUT} AUDIT   {name}  {_summarise(fields)}", AUDIT)
         self._record(name, stream=stream, **fields)
 
     def system(self, name: str, text: str = "", **fields: Any) -> None:
@@ -309,10 +386,12 @@ class Trace:
 
     def _record(self, event: str, stream: str = PROCESS, **fields: Any) -> None:
         payload = {"ts": int(time.time() * 1000), "service": self.service,
-                   "run_id": self.run_id, "stream": stream, "event": event,
+                   "trace_id": self.trace_id, "stream": stream, "event": event,
                    **redact({**getattr(self, "_bound", {}), **fields})}
         line = json.dumps(payload, default=str)
-        self._log.info(line)
+        if stream not in self._logs:
+            self._logs[stream] = _logger(self.service, stream, self._log_dir)
+        self._logs[stream].info(line)
         if self._json_console:
             print(line, flush=True)
 
@@ -339,7 +418,7 @@ class _Silent(Trace):
     """
 
     def __init__(self) -> None:                    # noqa: D107 - deliberately not super()
-        self.service, self.run_id = "", ""
+        self.service, self.trace_id = "", ""
         self.started = time.perf_counter()
         self._json_console = False
         self._bound = {}
@@ -352,9 +431,15 @@ class _Silent(Trace):
         pass
 
 
-def _logger(service: str, log_dir: Path | None) -> logging.Logger:
-    """File-only logger: the console is written by Trace itself, in human form."""
-    log = logging.getLogger(f"bench_outreach.trace.{service}")
+def _logger(service: str, stream: str, log_dir: Path | None) -> logging.Logger:
+    """One file per (service, stream): logs/<service>/<stream>.jsonl.
+
+    They were one file, and answering "is the service healthy?" meant reading past
+    a few hundred lines of narration about one lead. The three questions are asked
+    by different people at different times, so they get different files — the shape
+    LQABR's research agent already uses.
+    """
+    log = logging.getLogger(f"bench_outreach.trace.{service}.{stream}")
     if log.handlers:
         return log
     log.setLevel(logging.INFO)
@@ -363,7 +448,7 @@ def _logger(service: str, log_dir: Path | None) -> logging.Logger:
     directory = log_dir or (REPO_ROOT / "logs" / service)
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        handler = logging.FileHandler(directory / f"{service}.jsonl", encoding="utf-8")
+        handler = logging.FileHandler(directory / f"{stream}.jsonl", encoding="utf-8")
         handler.setFormatter(logging.Formatter("%(message)s"))
         log.addHandler(handler)
     except OSError:

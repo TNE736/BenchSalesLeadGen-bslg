@@ -38,27 +38,39 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 SHOW_FULL = False
-LOGS = {"email_agent": REPO / "logs" / "email_agent" / "email_agent.jsonl",
-        "gateway": REPO / "logs" / "gateway" / "gateway.jsonl"}
+STREAMS = ("system", "process", "audit")
+LOGS = {"email_agent": REPO / "logs" / "email_agent",
+        "gateway": REPO / "logs" / "gateway"}
 
 #: Keys already shown in the rendered line, so printing them again is noise.
-_SHOWN = {"ts", "service", "run_id", "stream", "event", "object_id", "trigger_id",
+_SHOWN = {"ts", "service", "trace_id", "stream", "event", "object_id", "trigger_id",
           "step", "label", "detail", "title", "endpoint", "ok", "status",
           "duration_ms", "input_tokens", "output_tokens", "summary"}
 
 
-def load(path: Path) -> list[dict]:
-    if not path.exists():
-        raise SystemExit(f"no log at {path.relative_to(REPO)} — nothing has run yet")
-    out = []
-    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if not line.strip():
+def load(directory: Path, only: str = "") -> list[dict]:
+    """Every record from a service's stream files, oldest first.
+
+    Three files now, not one. A caller asking for "the log" means all of it — the
+    split exists so you CAN read one stream, not so you have to.
+    """
+    names = (only,) if only else STREAMS
+    records, found = [], []
+    for stream in names:
+        path = directory / f"{stream}.jsonl"
+        if not path.exists():
             continue
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            print(f"  ! line {n} is not valid JSON, skipped")
-    return out
+        found.append(path.name)
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                print(f"  ! {path.name} line {n} is not valid JSON, skipped")
+    if not found:
+        raise SystemExit(f"no logs in {directory.relative_to(REPO)} — nothing has run yet")
+    return sorted(records, key=lambda r: r.get("ts", 0))
 
 
 DESCRIBES = {
@@ -81,15 +93,15 @@ def took(ms) -> str:
 def group(records: list[dict]) -> dict[str, list[dict]]:
     runs: dict[str, list[dict]] = {}
     for r in records:
-        runs.setdefault(r.get("run_id", "?"), []).append(r)
+        runs.setdefault(r.get("trace_id", "?"), []).append(r)
     return runs
 
 
-def headline(run_id: str, rs: list[dict]) -> str:
+def headline(trace_id: str, rs: list[dict]) -> str:
     end = next((r for r in reversed(rs) if r.get("event") == "run_finished"), {})
     lead = next((r.get("object_id") for r in rs if r.get("object_id")), "-")
     status = end.get("status") or end.get("summary") or "unfinished"
-    return (f"{clock(rs[0]['ts'])}  {run_id:22} lead {str(lead):14} "
+    return (f"{clock(rs[0]['ts'])}  {trace_id:22} lead {str(lead):14} "
             f"{took(end.get('duration_ms')):>8}  {status}")
 
 
@@ -118,10 +130,10 @@ def compact(r: dict, width: int = 96) -> str:
     return line if len(line) <= width else line[:width - 3] + "..."
 
 
-def render(run_id: str, rs: list[dict]) -> None:
+def render(trace_id: str, rs: list[dict]) -> None:
     print()
     print("=" * 78)
-    print(headline(run_id, rs))
+    print(headline(trace_id, rs))
     print("=" * 78)
     for r in rs:
         ev, when = r.get("event"), clock(r["ts"])
@@ -192,8 +204,8 @@ def stitch(prefix: str | None) -> int:
     """
     agent, gateway = load(LOGS["email_agent"]), load(LOGS["gateway"])
 
-    ids = [r["run_id"] for r in agent
-           if str(r.get("run_id", "")).startswith("trg-")]
+    ids = [r["trace_id"] for r in agent
+           if str(r.get("trace_id", "")).startswith("trg-")]
     ids = list(dict.fromkeys(ids))
     if prefix:
         ids = [i for i in ids if i.startswith(prefix)]
@@ -206,9 +218,9 @@ def stitch(prefix: str | None) -> int:
 
     # Everything the gateway did in the delivery that minted this trigger, so the
     # signature check and the routing decision are included, not just the hand-off.
-    owning = {r.get("run_id") for r in gateway if r.get("trigger_id") == tid}
-    rows = ([dict(r, _who="gateway") for r in gateway if r.get("run_id") in owning]
-            + [dict(r, _who="agent") for r in agent if r.get("run_id") == tid])
+    owning = {r.get("trace_id") for r in gateway if r.get("trigger_id") == tid}
+    rows = ([dict(r, _who="gateway") for r in gateway if r.get("trace_id") in owning]
+            + [dict(r, _who="agent") for r in agent if r.get("trace_id") == tid])
     rows.sort(key=lambda r: r["ts"])
 
     lead = next((r.get("object_id") for r in rows if r.get("object_id")), "-")
@@ -290,31 +302,36 @@ def main() -> int:
 
     if args.runs:
         print(f"{len(runs)} runs in {LOGS[which].relative_to(REPO)}\n")
-        for run_id, rs in runs.items():
-            print("  " + headline(run_id, rs))
+        for trace_id, rs in runs.items():
+            print("  " + headline(trace_id, rs))
         return 0
 
     only = ("audit" if args.audit else "system" if args.system
             else "process" if args.process else "")
     if only:
         rows = [r for r in records
-                if r.get("stream", "process") == only and r.get("run_id") in runs]
+                if r.get("stream", "process") == only and r.get("trace_id") in runs]
         print(f"\n{only.upper()} stream — {DESCRIBES[only]}\n")
         if not rows:
             print(f"  (nothing on the {only} stream here)")
             return 0
         for r in rows:
-            if only == "audit":
+            if only == "audit" and r.get("event") == "outbound_call":
                 money = (f"   {r['input_tokens']} in / {r['output_tokens']} out"
                          if r.get("input_tokens") is not None else "")
-                print(f"{clock(r['ts'])}  {r.get('run_id',''):22} "
+                print(f"{clock(r['ts'])}  {r.get('trace_id',''):34} "
                       f"{r.get('service',''):10} {r.get('endpoint',''):20} "
                       f"{str(r.get('status') or '-'):>4} "
                       f"{took(r.get('duration_ms'))}{money}")
+            elif only == "audit":
+                # The accountability half of the stream: who was allowed through,
+                # who was refused, what we changed. Not a call, so not call columns.
+                print(f"{clock(r['ts'])}  {r.get('trace_id',''):34} "
+                      f"{str(r.get('event','')):20} {compact(r, 60)}")
             else:
                 text = (r.get("detail") or r.get("label") or r.get("title")
                         or r.get("summary") or compact(r))
-                print(f"{clock(r['ts'])}  {r.get('run_id',''):22} "
+                print(f"{clock(r['ts'])}  {r.get('trace_id',''):34} "
                       f"{str(r.get('event','')):16} {text}")
         totals(rows)
         return 0
@@ -323,12 +340,12 @@ def main() -> int:
     if not chosen:
         print("nothing to show")
         return 1
-    for run_id, rs in chosen:
+    for trace_id, rs in chosen:
         if args.raw:
             for r in rs:
                 print(json.dumps(r, ensure_ascii=False))
         else:
-            render(run_id, rs)
+            render(trace_id, rs)
             totals(rs)
     return 0
 

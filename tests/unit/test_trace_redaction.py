@@ -58,7 +58,8 @@ def test_redaction_cannot_be_bypassed_by_calling_the_trace_directly(tmp_path):
     """The guarantee: it runs inside _record, not at the call sites."""
     t = Trace("redact_t", "run", "t", tmp_path)
     t.event("careless", email="someone@example.com", api_key="sk-real")
-    written = (tmp_path / "redact_t.jsonl").read_text(encoding="utf-8")
+    # Records land in per-stream files now; the guarantee must hold across all of them.
+    written = "\n".join(f.read_text(encoding="utf-8") for f in sorted(tmp_path.glob("*.jsonl")))
     assert "someone@example.com" not in written
     assert "sk-real" not in written
     assert json.loads(written.splitlines()[-1])["api_key"] == REDACTED
@@ -114,3 +115,51 @@ def test_a_lead_address_in_a_subject_is_still_redacted():
                   "params": {"subject": "[TEST -> lead@gmail.com] Architect requirement"}})
     assert out["message_id"] == MESSAGE_ID, "the id survives"
     assert "lead@gmail.com" not in out["params"]["subject"], "the address does not"
+
+
+def test_audit_events_reach_the_console_not_just_the_file(tmp_path, capsys):
+    """The run header promises AUDIT lines are marked. Until this was added only
+    outbound_call kept that promise — the decisions went to the file and nowhere
+    else, so the terminal showed the stream's cost half and hid its audit half."""
+    t = Trace("audit_console", "trace-1", "t", tmp_path)
+    t.event("guards_passed", stream="audit", decision_maker="true")
+    t.event("contact_read", properties_returned=["email"])      # process: silent
+    out = capsys.readouterr().out
+    assert "AUDIT   guards_passed" in out
+    assert "decision_maker=true" in out
+    assert "contact_read" not in out, "a process event still has no console line"
+
+
+def test_the_console_summary_is_redacted_too(tmp_path, capsys):
+    """A terminal is as easy to paste into a ticket as a log file is."""
+    t = Trace("audit_console2", "trace-2", "t", tmp_path)
+    t.event("guard_stopped", stream="audit", value="lead@example.com",
+            api_key="sk-ant-real")
+    out = capsys.readouterr().out
+    assert "lead@example.com" not in out and "sk-ant-real" not in out
+
+
+def test_a_source_ip_survives():
+    """`216.157.40.54` came out as <redacted> on a signature_verified record: twelve
+    digits and dots read as a phone number. The source IP is the one field a security
+    audit line exists to carry — without it the line proves nothing."""
+    out = redact({"source_ip": "216.157.40.54", "note": "from 216.157.40.54"})
+    assert out["source_ip"] == "216.157.40.54"
+    assert out["note"] == "from 216.157.40.54"
+
+
+def test_a_trace_id_survives_inside_free_text():
+    """`trigger id bslg-20260921T113233-5c066ab10e87 minted` was logged as
+    `bslg-20260921T<redacted>c066ab10e87`: the slice `113233-5` is seven digits and a
+    hyphen. Losing the id inside the sentence that announces it defeats the log."""
+    tid = "bslg-20260921T113233-5c066ab10e87"
+    out = redact({"detail": f"trigger id {tid} minted for this lead", "trace_id": tid})
+    assert out["detail"] == f"trigger id {tid} minted for this lead"
+    assert out["trace_id"] == tid
+
+
+def test_exempting_trace_ids_did_not_open_a_hole_next_to_one():
+    """The exemption covers the id, not the rest of the sentence."""
+    out = redact({"detail": "bslg-20260921T113233-5c066ab10e87 called +1 (469) 731-0001"})
+    assert "bslg-20260921T113233-5c066ab10e87" in out["detail"]
+    assert "469" not in out["detail"] and REDACTED in out["detail"]
