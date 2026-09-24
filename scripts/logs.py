@@ -33,32 +33,49 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 SHOW_FULL = False
-LOGS = {"email_agent": REPO / "logs" / "email_agent" / "email_agent.jsonl",
-        "gateway": REPO / "logs" / "gateway" / "gateway.jsonl"}
+STREAMS = ("system", "process", "audit")
+#: Universal Observability Spec, Part 9: <destination>/<service>_<stream>.log.
+#: The destination is the operator's (Input 3, in each service's yaml); both
+#: services share it here, and the service name is in the file name.
+#: Logging Spec v3.0 §1 -- one folder per service, three files inside it.
+LOGS = {"email_agent": REPO / "logs" / "email_agent",
+        "gateway": REPO / "logs" / "gateway"}
 
 #: Keys already shown in the rendered line, so printing them again is noise.
-_SHOWN = {"ts", "service", "run_id", "stream", "event", "object_id", "trigger_id",
-          "step", "label", "detail", "title", "endpoint", "ok", "status",
+_SHOWN = {"ts", "service", "service_version", "severity", "trace_id", "stream", "event",
+          "object_id", "trigger_id", "step", "step_no", "label", "detail", "title", "peer",
+          "endpoint", "ok", "status", "method", "attempt", "credential_name", "reason",
           "duration_ms", "input_tokens", "output_tokens", "summary"}
 
 
-def load(path: Path) -> list[dict]:
-    if not path.exists():
-        raise SystemExit(f"no log at {path.relative_to(REPO)} — nothing has run yet")
-    out = []
-    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if not line.strip():
+def load(directory: Path, only: str = "", service: str = "") -> list[dict]:
+    """Every record from a service's stream files, oldest first.
+
+    Three files, not one. A caller asking for "the log" means all of it — the
+    split exists so you CAN read one stream, not so you have to.
+    """
+    names = (only,) if only else STREAMS
+    records, found = [], []
+    for stream in names:
+        path = directory / f"{stream}.log"
+        if not path.exists():
             continue
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            print(f"  ! line {n} is not valid JSON, skipped")
-    return out
+        found.append(path.name)
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                print(f"  ! {path.name} line {n} is not valid JSON, skipped")
+    if not found:
+        raise SystemExit(f"no logs in {directory.relative_to(REPO)} — nothing has run yet")
+    return sorted(records, key=lambda r: ms(r.get("ts")))
 
 
 DESCRIBES = {
@@ -70,8 +87,19 @@ LEGEND = ("streams:  system = the service   process = the work on one lead   "
           "audit = calls that left this process")
 
 
-def clock(ms: float) -> str:
-    return datetime.fromtimestamp(ms / 1000).strftime("%H:%M:%S")
+def ms(ts) -> float:
+    """Epoch milliseconds from a Part 2 timestamp (RFC 3339, UTC, `Z`)."""
+    if isinstance(ts, (int, float)):
+        return float(ts)                     # a record from before the spec
+    try:
+        at = datetime.strptime(str(ts), "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+        return at.timestamp() * 1000
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def clock(ts) -> str:
+    return datetime.fromtimestamp(ms(ts) / 1000).strftime("%H:%M:%S")
 
 
 def took(ms) -> str:
@@ -79,17 +107,25 @@ def took(ms) -> str:
 
 
 def group(records: list[dict]) -> dict[str, list[dict]]:
+    """Records by trace id -- but only the ids that did WORK.
+
+    Every process start is its own unit of work with its own trace id (it is an
+    entry point), and so is every /healthz poll. Neither is a run. A trace id
+    counts as a run when something happened on the process stream beyond a
+    service starting: a webhook received, a lead worked, a dry run.
+    """
     runs: dict[str, list[dict]] = {}
     for r in records:
-        runs.setdefault(r.get("run_id", "?"), []).append(r)
-    return runs
+        runs.setdefault(r.get("trace_id", "?"), []).append(r)
+    return {tid: rs for tid, rs in runs.items()
+            if any(r.get("event") == "run_start" for r in rs)}
 
 
-def headline(run_id: str, rs: list[dict]) -> str:
-    end = next((r for r in reversed(rs) if r.get("event") == "run_finished"), {})
+def headline(trace_id: str, rs: list[dict]) -> str:
+    end = next((r for r in reversed(rs) if r.get("event") == "run_end"), {})
     lead = next((r.get("object_id") for r in rs if r.get("object_id")), "-")
-    status = end.get("status") or end.get("summary") or "unfinished"
-    return (f"{clock(rs[0]['ts'])}  {run_id:22} lead {str(lead):14} "
+    status = end.get("status") or "unfinished"
+    return (f"{clock(rs[0]['ts'])}  {trace_id:22} lead {str(lead):14} "
             f"{took(end.get('duration_ms')):>8}  {status}")
 
 
@@ -118,10 +154,10 @@ def compact(r: dict, width: int = 96) -> str:
     return line if len(line) <= width else line[:width - 3] + "..."
 
 
-def render(run_id: str, rs: list[dict]) -> None:
+def render(trace_id: str, rs: list[dict]) -> None:
     print()
     print("=" * 78)
-    print(headline(run_id, rs))
+    print(headline(trace_id, rs))
     print("=" * 78)
     for r in rs:
         ev, when = r.get("event"), clock(r["ts"])
@@ -130,12 +166,18 @@ def render(run_id: str, rs: list[dict]) -> None:
             if r.get("input_tokens") is not None:
                 money = f"   {r['input_tokens']} in / {r['output_tokens']} out"
             mark = "ok " if r.get("ok") else "FAIL"
-            print(f"{when}  AUDIT    {r.get('service',''):10} {r.get('endpoint',''):20} "
+            print(f"{when}  AUDIT    {r.get('peer',''):10} {r.get('endpoint',''):20} "
                   f"{mark} {str(r.get('status') or '-'):>4} {took(r.get('duration_ms'))}{money}")
-        elif ev == "step":
-            print(f"{when}  ------   {r.get('step')}. {r.get('label','')}")
-        elif ev in ("run_started", "run_finished"):
-            print(f"{when}  {ev:8} {r.get('title') or r.get('summary','')}")
+        elif ev == "step_in":
+            print(f"{when}  ------   {r.get('step','')}  {compact(r.get('inputs') or {}, 60)}")
+        elif ev == "step_out":
+            status = r.get("status", "")
+            flag = {"ok": "ok  ", "failed": "FAIL", "skipped": "skip"}.get(status, status)
+            reason = f"  {r['reason']}" if r.get("reason") else ""
+            print(f"{when}  {flag:8} {r.get('step','')} {took(r.get('duration_ms'))}{reason}")
+        elif ev in ("run_start", "run_end"):
+            print(f"{when}  {ev:9} {r.get('trigger', '')}{r.get('status','')}"
+                  f"  {compact(r.get('inputs') or r.get('outputs') or {}, 60)}")
         else:
             flag = {"fail": "FAIL", "warn": "warn", "ok": "ok  "}.get(ev, ev)
             print(f"{when}  {flag:8} {r.get('detail') or r.get('title','')}")
@@ -190,10 +232,11 @@ def stitch(prefix: str | None) -> int:
     while the trigger id follows ONE lead. The trigger id is therefore the join,
     and this is the only view where the hand-off between the two is visible.
     """
-    agent, gateway = load(LOGS["email_agent"]), load(LOGS["gateway"])
+    agent = load(LOGS["email_agent"], service="email_agent")
+    gateway = load(LOGS["gateway"], service="gateway")
 
-    ids = [r["run_id"] for r in agent
-           if str(r.get("run_id", "")).startswith("trg-")]
+    ids = [r["trace_id"] for r in agent
+           if str(r.get("trace_id", "")).startswith("trg-")]
     ids = list(dict.fromkeys(ids))
     if prefix:
         ids = [i for i in ids if i.startswith(prefix)]
@@ -206,13 +249,13 @@ def stitch(prefix: str | None) -> int:
 
     # Everything the gateway did in the delivery that minted this trigger, so the
     # signature check and the routing decision are included, not just the hand-off.
-    owning = {r.get("run_id") for r in gateway if r.get("trigger_id") == tid}
-    rows = ([dict(r, _who="gateway") for r in gateway if r.get("run_id") in owning]
-            + [dict(r, _who="agent") for r in agent if r.get("run_id") == tid])
-    rows.sort(key=lambda r: r["ts"])
+    owning = {r.get("trace_id") for r in gateway if r.get("trigger_id") == tid}
+    rows = ([dict(r, _who="gateway") for r in gateway if r.get("trace_id") in owning]
+            + [dict(r, _who="agent") for r in agent if r.get("trace_id") == tid])
+    rows.sort(key=lambda r: ms(r["ts"]))
 
     lead = next((r.get("object_id") for r in rows if r.get("object_id")), "-")
-    span = (rows[-1]["ts"] - rows[0]["ts"]) / 1000
+    span = (ms(rows[-1]["ts"]) - ms(rows[0]["ts"])) / 1000
     print()
     print("=" * 78)
     print(f"  {tid}   lead {lead}   {span:.1f}s   HubSpot -> gateway -> email agent")
@@ -227,11 +270,15 @@ def stitch(prefix: str | None) -> int:
             money = (f"   {r['input_tokens']} in / {r['output_tokens']} out"
                      if r.get("input_tokens") is not None else "")
             print(f"{clock(r['ts'])}  {r['_who']:8} {band:8} {'call':14} "
-                  f"{r.get('service',''):10}{r.get('endpoint',''):20} "
+                  f"{r.get('peer',''):10}{r.get('endpoint',''):20} "
                   f"{str(r.get('status') or '-'):>4} {took(r.get('duration_ms'))}{money}")
-        elif ev == "step":
+        elif ev == "step_in":
             print(f"{clock(r['ts'])}  {r['_who']:8} {band:8} {'step':14} "
-                  f"{r.get('step')}. {r.get('label','')}")
+                  f"{r.get('step','')}")
+        elif ev == "step_out":
+            reason = f"  {r['reason']}" if r.get("reason") else ""
+            print(f"{clock(r['ts'])}  {r['_who']:8} {band:8} {'step ' + str(r.get('status','')):14} "
+                  f"{r.get('step','')} {took(r.get('duration_ms'))}{reason}")
         else:
             # Events like contact_read carry no prose. Printing the event name
             # twice tells you nothing, so fall back to the fields themselves.
@@ -272,7 +319,7 @@ def main() -> int:
         return stitch(args.trace or None)
 
     which = "gateway" if args.gateway else "email_agent"
-    records = load(LOGS[which])
+    records = load(LOGS[which], service=which)
     runs = group(records)
 
     if args.lead:
@@ -290,31 +337,40 @@ def main() -> int:
 
     if args.runs:
         print(f"{len(runs)} runs in {LOGS[which].relative_to(REPO)}\n")
-        for run_id, rs in runs.items():
-            print("  " + headline(run_id, rs))
+        for trace_id, rs in runs.items():
+            print("  " + headline(trace_id, rs))
         return 0
 
     only = ("audit" if args.audit else "system" if args.system
             else "process" if args.process else "")
     if only:
-        rows = [r for r in records
-                if r.get("stream", "process") == only and r.get("run_id") in runs]
+        #: A stream view shows the whole stream. `system` in particular IS the
+        #: service starts, which `group()` rightly keeps out of the run list.
+        #: Only narrow to runs when the caller narrowed (--lead, --run, --failures).
+        narrowed = bool(args.lead or args.run or args.failures)
+        rows = [r for r in records if r.get("stream", "process") == only
+                and (not narrowed or r.get("trace_id") in runs)]
         print(f"\n{only.upper()} stream — {DESCRIBES[only]}\n")
         if not rows:
             print(f"  (nothing on the {only} stream here)")
             return 0
         for r in rows:
-            if only == "audit":
+            if only == "audit" and r.get("event") == "outbound_call":
                 money = (f"   {r['input_tokens']} in / {r['output_tokens']} out"
                          if r.get("input_tokens") is not None else "")
-                print(f"{clock(r['ts'])}  {r.get('run_id',''):22} "
-                      f"{r.get('service',''):10} {r.get('endpoint',''):20} "
+                print(f"{clock(r['ts'])}  {r.get('trace_id',''):34} "
+                      f"{r.get('peer',''):10} {r.get('endpoint',''):20} "
                       f"{str(r.get('status') or '-'):>4} "
                       f"{took(r.get('duration_ms'))}{money}")
+            elif only == "audit":
+                # The accountability half of the stream: who was allowed through,
+                # who was refused, what we changed. Not a call, so not call columns.
+                print(f"{clock(r['ts'])}  {r.get('trace_id',''):34} "
+                      f"{str(r.get('event','')):20} {compact(r, 60)}")
             else:
                 text = (r.get("detail") or r.get("label") or r.get("title")
                         or r.get("summary") or compact(r))
-                print(f"{clock(r['ts'])}  {r.get('run_id',''):22} "
+                print(f"{clock(r['ts'])}  {r.get('trace_id',''):34} "
                       f"{str(r.get('event','')):16} {text}")
         totals(rows)
         return 0
@@ -323,12 +379,12 @@ def main() -> int:
     if not chosen:
         print("nothing to show")
         return 1
-    for run_id, rs in chosen:
+    for trace_id, rs in chosen:
         if args.raw:
             for r in rs:
                 print(json.dumps(r, ensure_ascii=False))
         else:
-            render(run_id, rs)
+            render(trace_id, rs)
             totals(rs)
     return 0
 

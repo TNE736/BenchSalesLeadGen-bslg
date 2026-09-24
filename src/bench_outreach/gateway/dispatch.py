@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 import httpx
 
+from . import gateway_logging as glog
 from ..common.settings import env
 from .router import Decision, Target
 
@@ -28,6 +29,21 @@ class Outcome:
         return self.__dict__.copy()
 
 
+@dataclass(frozen=True)
+class Attempt:
+    """One try, reported as it happens -- Part 4 wants `outbound_call` once per
+    attempt, not once per outcome, so a retry is two records, not a count."""
+
+    attempt: int
+    ok: bool
+    status_code: int | None
+    latency_ms: float
+    error: str | None = None
+
+
+OnAttempt = Callable[[Attempt], None]
+
+
 class Dispatcher:
     def __init__(
         self,
@@ -44,12 +60,15 @@ class Dispatcher:
     def url_for(self, target_key: str) -> str:
         return env(self._targets[target_key].url_env)
 
-    def send(self, decision: Decision) -> Outcome:
+    def send(self, decision: Decision, on_attempt: OnAttempt | None = None) -> Outcome:
         target = self._targets[decision.target]
         url = self.url_for(decision.target)
         payload = decision.handoff_payload()
         if not url:
-            return self._to_outbox(decision, payload)
+            outcome = self._to_outbox(decision, payload)
+            if on_attempt:
+                on_attempt(Attempt(1, True, None, 0.0))
+            return outcome
 
         started = time.perf_counter()
         attempts = 0
@@ -57,15 +76,17 @@ class Dispatcher:
         status: int | None = None
         while attempts <= target.max_retries:
             attempts += 1
+            tick = time.perf_counter()
+            status, error, stop = None, None, False
             try:
-                resp = self._client.post(url, json=payload, timeout=target.timeout_seconds)
+                #: §3 -- the id crosses in the call's metadata, so the email
+                #: agent adopts it at its entry point.
+                resp = self._client.post(url, json=payload, timeout=target.timeout_seconds,
+                                         headers=glog.traceparent())
                 status = resp.status_code
-                if 200 <= status < 300:
-                    return Outcome(decision.trigger_id, True, url, status, attempts,
-                                   (time.perf_counter() - started) * 1000)
-                error = f"HTTP {status}"
-                if status < 500 and status != 429:
-                    break                                   # a 4xx will not fix itself
+                if not 200 <= status < 300:
+                    error = f"HTTP {status}"
+                    stop = status < 500 and status != 429     # a 4xx will not fix itself
             except httpx.TimeoutException as exc:
                 # NOT retried. A timeout means "no answer", not "not done" — the agent
                 # may be mid-compose and about to email this person. Retrying that
@@ -73,9 +94,17 @@ class Dispatcher:
                 # 17 Sep 2026 with a 10s timeout against a 17s compose.
                 error = (f"no answer within {target.timeout_seconds}s — the agent may "
                          f"still be working this lead ({type(exc).__name__})")
-                break
+                stop = True
             except httpx.HTTPError as exc:
                 error = f"{type(exc).__name__}: {exc}"
+            if on_attempt:
+                on_attempt(Attempt(attempts, error is None, status,
+                                   round((time.perf_counter() - tick) * 1000, 1), error))
+            if error is None:
+                return Outcome(decision.trigger_id, True, url, status, attempts,
+                               (time.perf_counter() - started) * 1000)
+            if stop:
+                break
             if attempts <= target.max_retries:
                 self._sleep(target.backoff_seconds * (2 ** (attempts - 1)))
         return Outcome(decision.trigger_id, False, url, status, attempts,

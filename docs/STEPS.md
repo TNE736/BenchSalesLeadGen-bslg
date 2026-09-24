@@ -1252,3 +1252,64 @@ its own; the `send_email` refusals are what keep the guarantees.
 
 Offline: the full suite. Live: `scripts/dry_run.py` against a real contact — see
 the run transcript in `logs/email_agent/runs/`.
+
+## Step 13 — Logging: Logging Spec v3.0 ✅ built
+
+**21–24 Sep 2026.** Both services log through one shared engine,
+`common/logging_core.py`, written to Logging Spec v3.0. Each service has its own
+thin module — `gateway/gateway_logging.py` and `email_agent/email_agent_logging.py`
+— which binds the service name once and is the only logging import in that
+service. The engine is shared rather than copied so the two cannot drift apart.
+
+### What a run looks like now
+
+- **Three files per service**, `logs/<service>/process.log`, `audit.log` and
+  `system.log`, plus a readable console.
+- **One trace id per unit of work**: 32 lowercase hex, created where the work
+  starts, passed to the email agent in a `traceparent` header and sent to
+  Mailgun with each email.
+- **The HubSpot boundary** (`gateway/carrier.py`): the trace id is written onto
+  the contact's `trace_id` field and a redelivery adopts it. Best effort: a
+  carrier that cannot be read or written is a logged `outbound_call` with
+  `ok: false`, and never stops a lead.
+- **Runs and steps end with a tally** by status and the keys of the items that
+  failed (`tests/unit/test_logging_tally.py`).
+- Redaction, three modes (`terse`, `normal`, `debug`), and logging never fails
+  the work it describes.
+
+### Settings
+
+`LOG_DIR`, `LOG_MODE` and `SERVICE_NAME`, set in the shell for one run and never
+in `.env` (see `.env.example`).
+
+### Files
+
+- **New:** `common/logging_core.py`, `gateway/gateway_logging.py`,
+  `email_agent/email_agent_logging.py`, `gateway/carrier.py`,
+  `scripts/check_logging.py` (the spec's §11 checks, C1–C14),
+  `tests/unit/test_logging_tally.py`.
+- **Deleted:** `common/trace.py`, `tests/unit/test_trace_redaction.py`.
+- **Changed:** gateway `app.py`, `dispatch.py`, `router.py`; email agent
+  `app.py`, `agent.py`, `sender.py`; `common/hubspot_mcp.py`; `scripts/logs.py`,
+  `scripts/dry_run.py`; tests.
+
+### Superseded first attempt
+
+A first version (21 Sep) followed the Universal Observability Specification
+v2.1 (`docs/UNIVERSAL_OBSERVABILITY_SPEC.md`, kept for reference), with
+`common/obs.py`, records in `logs/agents/` and 210 tests in
+`test_obs_spec.py` / `test_obs_entry_points.py`. It was replaced by the v3.0
+version before it was committed; `obs.py` and those tests do not exist.
+
+### Known drift, left as is on 24 Sep
+
+- `README.md` and `docs/RUNBOOK.md` still describe the v2.1 layout
+  (`logs/agents/`, `BENCH_LOG_*`).
+- `config/gateway.yaml` and `config/email.yaml` still carry an `observability:`
+  block that no code reads.
+
+To be corrected in a later commit.
+
+### Verified
+
+Offline: 138 tests pass (24 Sep 2026). Live: pending the first real event.

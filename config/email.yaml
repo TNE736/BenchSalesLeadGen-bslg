@@ -38,3 +38,8 @@ guards:
     - decision_maker
     - hs_email_optout
     - email_status
+    - trace_id                   # the carrier (Universal Observability Spec §5.8): the gateway wrote it
+
+observability:            # Universal Observability Spec, Input 3 -- the operator's values
+  destination: logs/agents   # -> logs/agents/<service>_{process,audit,system}.log
+  format: json               # json | text | auto

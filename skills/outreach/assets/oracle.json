@@ -1,0 +1,80 @@
+{
+  "_comment": "One file per technology. The key under `titles` is matched against HubSpot's `title` property, case-insensitively and exactly. `involves` phrases are copied into the email WORD FOR WORD by the guardrail in agent.py, so each one has to be a term a practitioner recognises instantly and has to read naturally inside a sentence.",
+  "_sourced": "Researched 21 Sep 2026 from Oracle official material (oracle.com certification catalogue, education.oracle.com track pages, docs.oracle.com, Oracle product blogs) and live 2026 contract postings on Dice and ZipRecruiter. Titles chosen on posting volume and contract mix: Fusion HCM/Financials/SCM are three separate hiring markets and are deliberately not merged. OCI Cloud Engineer was considered and rejected - most of that volume is Oracle Corporation hiring its own full-time staff, not a bench market. APEX and PL/SQL are real but small; add them when a lead appears.",
+  "technology": "Oracle",
+  "reference": "oracle.md",
+  "titles": {
+    "Oracle Fusion HCM Consultant": {
+      "description": "Configures and supports Oracle Fusion HCM across Core HR, Payroll, Absence and Benefits: fit-gap workshops first, then the build in Functional Setup Manager. Day to day is loading data, writing Fast Formulas, and regression testing every quarterly update.",
+      "involves": [
+        "HDL data loads",
+        "Fast Formula development",
+        "HCM Extracts",
+        "payroll element and balance setup",
+        "absence plan configuration",
+        "OTBI subject area reporting",
+        "quarterly update regression testing"
+      ]
+    },
+    "Oracle Fusion Financials Consultant": {
+      "description": "Owns the financial setup in Oracle Fusion ERP: ledgers, chart of accounts, subledger accounting, tax and intercompany, then drives the test cycles through to go-live. After go-live the work shifts to period close, reconciliation and reporting.",
+      "involves": [
+        "chart of accounts design",
+        "FBDI data conversions",
+        "subledger accounting rules",
+        "intercompany balancing rules",
+        "period close orchestration",
+        "tax rapid implementation setup",
+        "CRP and UAT cycle management"
+      ]
+    },
+    "Oracle Fusion SCM Consultant": {
+      "description": "Configures Oracle Fusion SCM and Procurement against a client's real supply chain: order orchestration, inventory, costing and purchasing. A large share of the work is item and product data governance, conversions, and coordinating integrations out to WMS and 3PL partners.",
+      "involves": [
+        "order orchestration setup",
+        "Product Data Hub item governance",
+        "cost accounting and costing method setup",
+        "procurement approval hierarchies",
+        "min-max replenishment setup",
+        "drop ship and back-to-back order flows",
+        "supplier onboarding and qualification"
+      ]
+    },
+    "Oracle Integration Cloud Developer": {
+      "description": "Builds the integration layer between Oracle Fusion SaaS and everything around it: scheduled and app-driven flows, REST and SOAP services, file-based transfers over SFTP. Also covers the Fusion technical surface, so reporting and scheduled jobs land here too.",
+      "involves": [
+        "OIC integration flow development",
+        "ERP Cloud adapter integrations",
+        "REST and SOAP service orchestration",
+        "FBDI bulk import automation",
+        "BI Publisher report development",
+        "ESS job scheduling",
+        "fault handling and error notification"
+      ]
+    },
+    "Oracle DBA": {
+      "description": "Keeps production Oracle estates running: clusters, standbys, backup and recovery, and the quarterly patch cycle. Tuning work runs on AWR and ASH, and a growing share of the job is migrating databases onto Exadata and Oracle Cloud Infrastructure.",
+      "involves": [
+        "RAC cluster administration",
+        "Data Guard switchover testing",
+        "RMAN backup and recovery strategy",
+        "quarterly RU patching",
+        "AWR and ASH analysis",
+        "ASM storage management",
+        "GoldenGate replication"
+      ]
+    },
+    "Oracle EBS Consultant": {
+      "description": "Supports and extends on-premise E-Business Suite R12, usually Financials or Supply Chain, through period close, enhancements and custom objects. An increasing share of the work is 12.2 upgrades and migration paths from EBS into Fusion Cloud.",
+      "involves": [
+        "R12 Financials configuration",
+        "Order-to-Cash cycle support",
+        "Procure-to-Pay setup",
+        "CEMLI object management",
+        "concurrent program development",
+        "interface tables and open API loads",
+        "EBS to Fusion data migration"
+      ]
+    }
+  }
+}

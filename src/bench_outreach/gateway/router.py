@@ -7,11 +7,13 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from ..common.settings import env
 from .events import HubSpotEvent
 
 
@@ -153,13 +155,29 @@ class RoutingResult:
     errors: list[str] = field(default_factory=list)   # matched but unusable → 503
 
 
+#: Prefix on every trigger id. One project, one prefix, so a line pulled out of
+#: a shared log still says which system produced it.
+PROJECT_ID = env("BENCH_PROJECT_ID") or "bslg"
+
+
 def mint_trigger_id(event: HubSpotEvent) -> str:
-    """Stable per HubSpot event, so a redelivery mints the same id."""
+    """The id of the WORK this event asks for: `<project>-<utc stamp>-<12 hex>`.
+
+    This is a TRIGGER id, not a trace id, and the two must never be confused.
+    A trace id is random, 32 hex, born where the work starts (§3). A trigger id
+    is the opposite on purpose: DETERMINISTIC per HubSpot event -- seeded from
+    the event's identity, stamped from its own `occurred_at` -- so a redelivery
+    mints the same string and the dedupe store recognises it. Never 32 hex, so
+    no parser can mistake one for the other. Logged as an ordinary field.
+    """
     key = f"{event.portal_id}:{event.event_id}" if event.event_id else (
         f"{event.portal_id}:{event.object_id}:{event.property_name}:"
         f"{event.property_value}:{event.occurred_at}"
     )
-    return "trg-" + hashlib.sha1(key.encode()).hexdigest()[:12]
+    when = (datetime.fromtimestamp(event.occurred_at / 1000, timezone.utc)
+            if event.occurred_at else datetime.now(timezone.utc))
+    stamp = when.strftime("%Y%m%dT%H%M%S")
+    return f"{PROJECT_ID}-{stamp}-{hashlib.sha1(key.encode()).hexdigest()[:12]}"
 
 
 class Router:

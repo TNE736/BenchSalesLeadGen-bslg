@@ -9,6 +9,8 @@ from typing import Any, Protocol
 
 import httpx
 
+from ..common import logging_core as _log
+
 from ..common.settings import env
 
 MAILGUN_API_BASE = "https://api.mailgun.net/v3"
@@ -84,7 +86,8 @@ class MailgunSender:
             data[f"v:{key}"] = value
         try:
             resp = self._client.post(f"{MAILGUN_API_BASE}/{self.domain}/messages",
-                                     auth=("api", self.api_key), data=data)
+                                     auth=("api", self.api_key), data=data,
+                                     headers=_log.traceparent())         # §5.7
         except (httpx.HTTPError, OSError) as exc:
             raise SendError(f"Mailgun unreachable: {exc}") from exc
         if resp.status_code != 200:
