@@ -195,9 +195,10 @@ it goes to `logs\email_agent\drafts-<date>.md` instead.
 
 ## Step 8 — Read the logs
 
-The terminal shows a five-line summary and then scrolls away. Everything else —
-every outbound call, its cost, which file versions wrote the email — is in
-`logs\email_agent\email_agent.jsonl`. One command reads it:
+The terminal shows the boxed story of each run and then scrolls away. Everything
+else — every outbound call, its cost, which file versions wrote the email — is in
+`logs\agents\`, as records written to the **Universal Observability Specification
+v2.1** (`docs\UNIVERSAL_OBSERVABILITY_SPEC.md`). One command reads them:
 
 ```powershell
 python scripts\logs.py --full               # EVERYTHING: timeline + prompt + email
@@ -214,92 +215,75 @@ python scripts\logs.py --gateway            # the gateway log instead
 python scripts\logs.py --raw                # the JSON itself
 ```
 
-`--trace` is the one to reach for after a real run. The gateway and the email
-agent write separate files and number their work differently — the gateway's run
-id covers a whole webhook *delivery*, while the trigger id it mints follows one
-*lead*, and the email agent adopts that as its own trace id. Both are
-`bslg-<utc timestamp>-<12 hex>`; the trigger id is seeded from HubSpot's event
-identity and timestamped from the event's own `occurred_at`, so a redelivery
-reproduces it exactly. `--trace` joins on the trigger id, so the hand-off between
-the two services is visible in a single timeline: signature check, routing
-decision, then all five agent steps.
-
-### Changing what the model is told
-
-Two files, no code:
-
-| to change | edit |
-|---|---|
-| the rules that hold for **every** lead — who the model is, the tools, what must never be disclosed | `config\\EMAIL_AGENT.md` |
-| how a **particular** kind of email is written | `skills\\<skill>\\SKILL.md` and its `assets\\`, `references\\` |
-
-`EMAIL_AGENT.md` is the system prompt. It is frontmatter then body, parsed exactly
-like a `SKILL.md`: the frontmatter documents the file for whoever edits it and is
-not sent, the body is. Two placeholders, `{{SKILLS}}` and `{{SENDER_NAME}}`, are
-filled in at send time. It is read once at startup — a missing file, missing
-frontmatter or a missing placeholder stops the service rather than failing on some
-unlucky lead — and it is fingerprinted, so `agent_md_sha` in the log pins the exact
-wording behind any email that went out. Its path is set by `skill.system_prompt` in
-`config\\email.yaml`.
-
-**It is deliberately not in `skills\\`.** The Agent Skills spec
-(agentskills.io/specification) defines a skill as a *directory* holding a
-`SKILL.md` that an agent chooses to read. This is what the model is told *before*
-it chooses, and its rules have to hold whatever a skill says — so it cannot be one
-of the things a skill can override. Putting it under `skills\\` would also mean
-`skill_catalogue()` eventually offering the agent its own system prompt as a skill
-to go and read. `skills\\` holds skill directories and nothing else; a test
-enforces that.
+`--trace` is the one to reach for after a real run. Since the specification
+landed there is **one trace id for the whole flow**: the gateway creates it when
+HubSpot's webhook arrives, writes it onto the contact in HubSpot, sends it to the
+email agent in a `traceparent` header, and the email agent adopts it. Every line
+of both services carries the same 32-hex string. `--trace` also still joins on
+the trigger id, which is what an older run has.
 
 ### Where the log files are
 
-Three files per service, not one — the shape LQABR's research agent uses:
+One folder, three files per service, named by the specification (Part 9):
 
 ```
-logs\email_agent\      system.jsonl   process.jsonl   audit.jsonl
-logs\gateway\          system.jsonl   process.jsonl   audit.jsonl
+logs\agents\   gateway_process.log      gateway_audit.log      gateway_system.log
+               email_agent_process.log  email_agent_audit.log  email_agent_system.log
 
 artifacts\email_agent\      drafts-2026-09-21.md
-artifacts\email_agent\runs\ bslg-20260921T094900-a1b2c3d4e5f6.md
+artifacts\email_agent\runs\ <trace id>.md
 artifacts\gateway\          outbox.jsonl
 ```
 
-**`logs\` holds three files per service and nothing else.** Logs are machine
-records, rotatable, and carry no personal data. Drafts and run transcripts are
+Where they go and in what format is the operator's choice (Input 3), set in each
+service's yaml under `observability:` — today `destination: logs/agents`,
+`format: json` — and overridable with `BENCH_LOG_DESTINATION`, `BENCH_LOG_FORMAT`,
+`BENCH_LOG_MODE`, `BENCH_LOG_MAX_BYTES`, `BENCH_LOG_BACKUPS`. Everything else —
+stream names, file names, field names, event names, limits, redaction — is fixed
+by the specification and is not configurable.
+
+**`logs\` holds records and nothing else.** Records are machine-readable, rotate at
+50 MB with five backups, and carry no personal data. Drafts and run transcripts are
 products of a run, are meant to be read by a person, and **do** carry a lead's name
 and address — so they live under `artifacts\`, which is gitignored for that reason.
-Mixing the two in one folder is what makes "can I delete this?" unanswerable.
 
-The gateway's `outbox.jsonl` is there for the same reason: it is a decision parked
-because no agent URL was configured — work waiting to be done, carrying a contact
-id. Not a log record.
+The gateway's `outbox.jsonl` is a decision parked because no agent URL was
+configured — work waiting to be done. Not a log record.
 
-`scripts\logs.py` reads all three and merges them by time, so you only name a
-stream when you want just that one.
+### The record
 
-### The trace id
+Every line carries the same seven fields (Part 2), whatever else it carries:
 
-One shape across every service and every entry point:
-
-```
-bslg-20260920T190701-c5f1fdc17901
- |         |              |
- |         |              +-- 12 hex
- |         +-- UTC timestamp
- +-- project id (BENCH_PROJECT_ID, default bslg)
+```json
+{"ts": "2026-09-21T16:20:30.536Z", "stream": "audit", "service": "gateway",
+ "service_version": "0.1.0", "event": "outbound_call",
+ "trace_id": "3e631730c0b1d11fff6dde13d06f9329", "severity": "INFO", ...}
 ```
 
-It replaced `run_id`, which had four different shapes — `dry-553374486245`,
-`livetest-1`, `trg-5a748b8752c0`, `startup` — none of which could be searched for
-together. `run_id` is now gone entirely: it survived for a while as a duplicate of
-`trace_id` on the gateway's `run_finished` line and in the JSON the gateway hands
-back to HubSpot, and both have been removed. HubSpot reads only the status code —
-it discards the body — so that copy was being written for nobody.
+`severity` is outcome, never verbosity: a `step_end` that failed is `ERROR`, one
+that was skipped is `WARN`, a call that came back `ok: false` is `ERROR`, and
+telemetry's own troubles (`sink_unavailable`, `trace_missing`, …) are `WARN`.
+There is no DEBUG.
 
-Two ids remain, and they answer different questions. `trace_id` is on every line:
-*which run wrote this?* `trigger_id` is minted per event by the router and adopted
-by the email agent as its own `trace_id`: *which lead is this about?* One webhook
-delivery is one `trace_id`; the work it starts follows the `trigger_id`.
+### The two ids
+
+**`trace_id`** — 32 lowercase hex, random, created **once** per flow at the
+gateway's `POST /hubspot/events` and adopted everywhere after. It travels two
+ways: in the `traceparent` header on every call that leaves a process, and as
+data in the `trace_id` property on the HubSpot contact, because HubSpot carries
+no headers back to us. **Every campaign gets a new one**: `decision_maker` set to
+Yes (`attemptNumber` 0) creates an id and overwrites the contact's old one. A
+HubSpot **retry** (`attemptNumber` > 0) finds the original's id on the contact and
+joins that flow instead of starting a second one. The email agent reads the id
+back with the contact and checks it against the header; agree, mismatch or
+absent, each is named in the log.
+
+**`trigger_id`** — `bslg-<utc stamp>-<12 hex>`, **deterministic** per HubSpot
+event, minted by the gateway's router. It is not a trace id and is never 32 hex,
+so no parser can mistake one for the other. It answers *which HubSpot event
+asked for this work* and is the same string on every redelivery of that event.
+
+`run_id` is gone.
 
 ### The three kinds of log
 

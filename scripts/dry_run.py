@@ -21,7 +21,7 @@ sys.path.insert(0, str(REPO / "src"))
 
 from bench_outreach.common.hubspot_mcp import HubSpotMCPError, NotAuthorised  # noqa: E402
 from bench_outreach.common.settings import env                                # noqa: E402
-from bench_outreach.common.trace import Trace, new_trace_id                                 # noqa: E402
+from bench_outreach.email_agent import email_agent_logging as elog                          # noqa: E402
 from bench_outreach.email_agent.agent import EmailAgent, load_config          # noqa: E402
 from bench_outreach.email_agent.sender import DryRunSender                    # noqa: E402
 
@@ -52,10 +52,12 @@ def main() -> int:
     print(f"contact {args.object_id}  ·  model {config['model']['name']}  ·  DRY RUN\n")
     started = time.perf_counter()
     try:
-        t = Trace("email_agent", new_trace_id(),
-                  f"Dry run   lead {args.object_id}", REPO / "logs" / "email_agent")
-        outcome = agent.work(args.object_id, trigger_id="dry-run", t=t)
-        t.end(f"{outcome.status} — {outcome.reason}", **outcome.as_dict())
+        #: Input 1, the second start: a command-line invocation. One run = one
+        #: contact, and the trace id is born here -- there is no gateway.
+        elog.configure_logging(folder=str(REPO / "logs" / "email_agent"))
+        with elog.run("cli dry_run", object_id=args.object_id):
+            outcome = agent.work(args.object_id, trigger_id="dry-run")
+            elog.finish(**outcome.as_dict())
     except NotAuthorised as exc:
         print(f"HubSpot: {exc}")
         return 1

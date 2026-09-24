@@ -47,12 +47,38 @@ def env(monkeypatch, tmp_path):
     return tmp_path
 
 
-def _client(env, agent: FakeAgent | None):
+class FakeHub:
+    """The carrier's HubSpot: one contact, one `trace_id` field, every call kept."""
+
+    def __init__(self, stored: str = ""):
+        self.stored = stored
+        self.calls: list[tuple[str, dict]] = []
+
+    def call(self, tool: str, args: dict) -> dict:
+        self.calls.append((tool, args))
+        if tool == "get_crm_objects":
+            return {"objects": [{"id": "555", "properties": {"trace_id": self.stored}}]}
+        if tool == "manage_crm_objects":
+            self.stored = args["updateRequest"]["objects"][0]["properties"]["trace_id"]
+            return {"updateResults": {"summary": {"updated": 1, "failed": 0}}}
+        raise AssertionError(f"unexpected tool {tool}")
+
+
+def _client(env, agent: FakeAgent | None, hub: FakeHub | None = None):
     transport = httpx.MockTransport(agent.handler) if agent else None
     dispatcher = Dispatcher(_config().targets, env / "outbox.jsonl",
                             client=httpx.Client(transport=transport) if transport else None,
                             sleep=lambda _: None)
-    return TestClient(create_app(_config(), dispatcher, log_dir=env))
+    return TestClient(create_app(_config(), dispatcher, hubspot=hub or FakeHub()))
+
+
+def _gateway_records(root, stream="audit"):
+    #: LOG_DIR (the spec's own setting, §1) outranks the folder the app asks
+    #: for, and the conftest points it at tmp_path/logs for every test. In
+    #: production the app's folder wins and each service gets its own.
+    path = root / "logs" / f"{stream}.log"
+    rows = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+    return [r for r in rows if r.get("service") == "gateway"]
 
 
 def _signed(body: list, ts: str | None = None, sig: str | None = None):
@@ -77,7 +103,7 @@ def test_yes_is_handed_off_with_trigger_and_contact_id(env):
     r = _client(env, agent).post("/hubspot/events", content=raw, headers=headers)
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["routed"] == 1 and body["handed_off"] == 1
+    assert body["routed"] == 1 and body["scheduled"] == 1
     assert agent.received[0]["object_id"] == "555"
     assert agent.received[0]["trigger_id"].startswith("bslg-")
 
@@ -97,12 +123,22 @@ def test_bad_signature_is_401_and_nothing_is_dispatched(env):
     assert r.status_code == 401 and not agent.received
 
 
-def test_agent_failure_is_503_so_hubspot_retries(env):
+def test_agent_failure_is_recorded_and_the_event_is_released_for_a_refire(env):
+    """HubSpot already has its 200 by the time the agent answers, so a failed
+    hand-off cannot be a 503 any more. It is a failed outbound_call on the
+    gateway's audit stream, and the dedupe store forgets the event so a manual
+    re-fire is dispatched again instead of being swallowed as a duplicate."""
     agent = FakeAgent(status=500)
+    client = _client(env, agent)
     raw, headers = _signed([_event()])
-    r = _client(env, agent).post("/hubspot/events", content=raw, headers=headers)
-    assert r.status_code == 503
-    assert r.json()["failed"] == 1 and len(agent.received) == 2   # 1 try + 1 retry
+    r = client.post("/hubspot/events", content=raw, headers=headers)
+    assert r.status_code == 200 and r.json()["scheduled"] == 1
+    assert len(agent.received) == 2                                # 1 try + 1 retry
+    failed = [x for x in _gateway_records(env) if x["event"] == "outbound_call" and not x["ok"]]
+    assert failed and "HTTP 500" in failed[-1]["error"]
+    raw, headers = _signed([_event()])                             # the same event again
+    client.post("/hubspot/events", content=raw, headers=headers)
+    assert len(agent.received) == 4, "released, so the re-fire was dispatched"
 
 
 def test_timeout_is_not_retried_because_the_agent_may_be_mid_compose(env):
@@ -118,13 +154,15 @@ def test_timeout_is_not_retried_because_the_agent_may_be_mid_compose(env):
     dispatcher = Dispatcher(_config().targets, env / "outbox.jsonl",
                             client=httpx.Client(transport=httpx.MockTransport(slow)),
                             sleep=lambda _: None)
-    client = TestClient(create_app(_config(), dispatcher, log_dir=env))
+    client = TestClient(create_app(_config(), dispatcher, hubspot=FakeHub()))
     raw, headers = _signed([_event()])
     r = client.post("/hubspot/events", content=raw, headers=headers)
 
     assert len(calls) == 1, "a timeout must be tried exactly once, never retried"
-    assert r.status_code == 503, "and reported as unresolved so nothing pretends it worked"
-    assert "may still be working" in r.json()["handoffs"][0]["error"]
+    assert r.status_code == 200, "HubSpot was answered before the hand-off ran"
+    failed = [x for x in _gateway_records(env) if x["event"] == "outbound_call" and not x["ok"]]
+    assert failed and "may still be working" in failed[-1]["error"], \
+        "reported as unresolved so nothing pretends it worked"
 
 
 def test_connection_error_is_still_retried(env):
@@ -138,7 +176,7 @@ def test_connection_error_is_still_retried(env):
     dispatcher = Dispatcher(_config().targets, env / "outbox.jsonl",
                             client=httpx.Client(transport=httpx.MockTransport(refused)),
                             sleep=lambda _: None)
-    client = TestClient(create_app(_config(), dispatcher, log_dir=env))
+    client = TestClient(create_app(_config(), dispatcher, hubspot=FakeHub()))
     raw, headers = _signed([_event()])
     client.post("/hubspot/events", content=raw, headers=headers)
     assert len(calls) == 2, "1 try + 1 retry, per max_retries in the test config"
@@ -166,7 +204,7 @@ def test_no_agent_configured_goes_to_outbox_not_lost(env, monkeypatch):
     monkeypatch.setenv("NEXT_AGENT_URL", "")
     raw, headers = _signed([_event()])
     r = _client(env, None).post("/hubspot/events", content=raw, headers=headers)
-    assert r.status_code == 200 and r.json()["handed_off"] == 1
+    assert r.status_code == 200 and r.json()["scheduled"] == 1
     lines = (env / "outbox.jsonl").read_text().strip().splitlines()
     assert len(lines) == 1 and json.loads(lines[0])["object_id"] == "555"
 
@@ -180,3 +218,19 @@ def test_readyz_reports_missing_secret(env, monkeypatch):
 def test_readyz_ok_when_configured(env):
     r = _client(env, FakeAgent()).get("/readyz")
     assert r.status_code == 200 and r.json()["targets"]["next"] == "http://agent.test/trigger"
+
+
+def test_the_background_work_continues_the_webhooks_trace_id(env):
+    """Logging Spec §3: background work copies the id in WHEN IT IS SCHEDULED.
+    Reading it after the run's `with` block has closed gets "" -- the store is
+    already restored -- and the background run mints its own. A real run on
+    22 Sep showed two ids for one campaign because of exactly that."""
+    agent = FakeAgent()
+    raw, headers = _signed([_event()])
+    assert _client(env, agent).post("/hubspot/events", content=raw, headers=headers).status_code == 200
+    records = _gateway_records(env, "process")
+    starts = [r for r in records if r["event"] == "run_start"]
+    assert len(starts) == 2, "the webhook run and the background run"
+    assert starts[0]["trace_id"] == starts[1]["trace_id"], \
+        f"one campaign, one id -- got {starts[0]['trace_id']} and {starts[1]['trace_id']}"
+    assert len({r["trace_id"] for r in records}) == 1

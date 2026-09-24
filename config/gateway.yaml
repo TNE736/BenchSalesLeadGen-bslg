@@ -26,3 +26,7 @@ targets:
 dedupe:
   ttl_seconds: 86400                  # HubSpot redelivers for up to 24h
   max_entries: 10000
+
+observability:            # Universal Observability Spec, Input 3 -- the operator's values
+  destination: logs/agents   # -> logs/agents/<service>_{process,audit,system}.log
+  format: json               # json | text | auto

@@ -9,6 +9,7 @@ Run:  uvicorn bench_outreach.email_agent.app:app --port 8081
 
 from __future__ import annotations
 
+import time
 from datetime import date
 from typing import Any
 
@@ -16,16 +17,16 @@ from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
+from .. import __version__
 from ..common.hubspot_mcp import HubSpotMCPError
 from ..common.settings import REPO_ROOT, env, env_bool
-from ..common.trace import ARROW, Trace, banner, new_trace_id
+from . import email_agent_logging as elog
 from .agent import (ARTIFACTS, EmailAgent, Outcome, check_sender_identity,
                     check_skill_files, load_config)
 from .sender import DryRunSender, MailgunSender
 
 CONFIG_PATH = REPO_ROOT / "config" / "email.yaml"
 TRIGGER_PATH = "/email/trigger"
-LOG_DIR = REPO_ROOT / "logs" / "email_agent"
 
 
 def build_agent(config: dict[str, Any], dry_run: bool) -> tuple[EmailAgent | None, list[str]]:
@@ -87,44 +88,44 @@ def create_app(config: dict[str, Any] | None = None, agent: EmailAgent | None = 
             return JSONResponse(status_code=503,
                                 content={"error": "agent not configured", "problems": problems})
 
-        # The gateway's trigger id IS the trace id, so both services' lines join on
-        # it. A direct POST (no gateway) mints its own rather than inventing a shape.
-        t = Trace("email_agent", trigger_id or new_trace_id(),
-                  f"Gateway {ARROW} Email Agent   lead {object_id}", LOG_DIR)
-        try:
-            outcome = await run_in_threadpool(agent.work, object_id, trigger_id, t)
-        except HubSpotMCPError as exc:
-            # HubSpot unreachable is not this lead's fault — 503 so the gateway retries.
-            t.fail(f"HubSpot: {exc}")
-            t.end("FAILED 503 — cannot reach HubSpot, gateway should retry")
-            return JSONResponse(status_code=503, content={"error": f"hubspot: {exc}"})
-        t.end(_verdict(outcome), **outcome.as_dict())
-        return JSONResponse(status_code=200, content=outcome.as_dict())
+        #: §3 -- the id crosses from the gateway in the call's metadata. Missing
+        #: or malformed, a new one is born here and `trace_missing` says so.
+        adopted = elog.from_traceparent(request.headers.get("traceparent"))
+        started = time.perf_counter()
+        with elog.run(f"POST {TRIGGER_PATH}", adopt=adopted,
+                      object_id=object_id, trigger_id=trigger_id):
+            if not adopted:
+                elog.system("trace_missing", where=f"POST {TRIGGER_PATH}")
+            try:
+                outcome = await run_in_threadpool(agent.work, object_id, trigger_id)
+            except HubSpotMCPError as exc:
+                # HubSpot unreachable is not this lead's fault — 503 so the gateway retries.
+                elog.finish(status="failed", reason=f"hubspot: {exc}")
+                elog.inbound_request(route=TRIGGER_PATH, method="POST", status=503, ok=False,
+                                     duration_ms=(time.perf_counter() - started) * 1000)
+                return JSONResponse(status_code=503, content={"error": f"hubspot: {exc}"})
+            elog.finish(**outcome.as_dict())
+            elog.inbound_request(route=TRIGGER_PATH, method="POST", status=200, ok=True,
+                                 duration_ms=(time.perf_counter() - started) * 1000)
+            return JSONResponse(status_code=200, content=outcome.as_dict())
 
-    banner("Email Agent", [
-        f"listening for the gateway at  {TRIGGER_PATH}",
-        "mode  " + ("DRY RUN — writes drafts to a file, sends nothing" if dry_run
-                    else "*** LIVE — REAL EMAILS WILL BE SENT ***"),
-        f"model  {config['model']['name']}",
-        f"skill  {config['skill']['path']}",
-        "log file  logs/email_agent/email_agent.jsonl",
-    ] + ([f"PROBLEM: {p}" for p in problems] or ["config  ok"]))
-    _log_startup(agent, config, dry_run, problems)
-    return app
-
-
-def _log_startup(agent: EmailAgent | None, config: dict[str, Any], dry_run: bool,
-                 problems: list[str]) -> None:
-    """One SYSTEM line at boot naming the skills this process offers the model."""
+    #: §1 and §6 -- everything in Part 1 is set up by this one call.
+    elog.configure_logging(
+        folder=str(REPO_ROOT / "logs" / "email_agent"), version=__version__,
+        credentials={"ANTHROPIC_API_KEY": "env" if env("ANTHROPIC_API_KEY") else "unset",
+                     "MAILGUN_API_KEY": "env" if env("MAILGUN_API_KEY") else "unset",
+                     "HUBSPOT_MCP_TOKEN_FILE": "file"},
+        dependencies={"anthropic": "ok" if env("ANTHROPIC_API_KEY") else "no key",
+                      "mailgun": "ok" if dry_run or env("MAILGUN_API_KEY") else "no key"})
     catalogue = agent.catalogue if agent else []
-    Trace("email_agent", new_trace_id(), "Email Agent starting", LOG_DIR).system(
-        "skill_loaded", f"{len(catalogue)} skill(s) in the catalogue: "
-        + ", ".join(s.name for s in catalogue),
-        dry_run=dry_run, model=config["model"]["name"],
-        agent_md=agent.system_prompt.path.relative_to(REPO_ROOT).as_posix() if agent else "",
-        agent_md_sha=agent.system_prompt.sha if agent else "",
-        skills=[f"{s.path.relative_to(REPO_ROOT).as_posix()}@{s.sha}" for s in catalogue],
-        problems=problems)
+    elog.system("skills_loaded", count=len(catalogue),
+                skills=[f"{s.path.relative_to(REPO_ROOT).as_posix()}@{s.sha}" for s in catalogue],
+                model=config["model"]["name"], dry_run=dry_run,
+                agent_md=agent.system_prompt.path.relative_to(REPO_ROOT).as_posix() if agent else "",
+                agent_md_sha=agent.system_prompt.sha if agent else "")
+    for problem in problems:
+        elog.system("config_invalid", setting="startup", given="", used=problem)
+    return app
 
 
 def _verdict(outcome: Outcome) -> str:

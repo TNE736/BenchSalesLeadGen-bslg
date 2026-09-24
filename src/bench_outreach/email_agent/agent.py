@@ -25,7 +25,8 @@ import yaml
 
 from ..common.hubspot_mcp import HubSpotMCP, HubSpotMCPError
 from ..common.settings import REPO_ROOT, env
-from ..common.trace import AUDIT, Trace
+from ..common import hubspot_mcp
+from . import email_agent_logging as elog
 from .sender import SendError, Sender, SendResult, UNSUBSCRIBE_TOKEN
 
 SENT, FAILED = "SENT", "FAILED"
@@ -37,7 +38,7 @@ ARTIFACTS = REPO_ROOT / "artifacts" / "email_agent"
 RUNS = ARTIFACTS / "runs"
 REQUIRED_SENDER_FIELDS = ("name", "company", "from_email", "postal_address")   # before a real send
 FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
-NOT_FOR_THE_MODEL = ("email", "mobilephone", "email_status", "hs_email_optout")  # PII + internal
+NOT_FOR_THE_MODEL = ("email", "mobilephone", "email_status", "hs_email_optout", "trace_id")  # PII + internal
 
 
 # ------------------------------------------------------------------ config
@@ -77,10 +78,12 @@ class Outcome:
 
 class Skipped(Exception):
     """A guard stopped this lead. Not an error — the guards doing their job."""
+    step_status = "skipped"          # what the open step frame ends as (Part 4)
 
 
 class Failed(Exception):
     """This lead could not be emailed. Written FAILED in HubSpot, never dropped."""
+    step_status = "failed"
 
 
 class ModelError(RuntimeError):
@@ -88,19 +91,43 @@ class ModelError(RuntimeError):
 
 
 # ----------------------------------------------------------------- helpers
-def _timed(t: Trace, service: str, endpoint: str, params: dict[str, Any],
-           call: Callable[[], Any], usage: Callable[[Any], dict[str, Any]] | None = None) -> Any:
-    """Run one call that leaves this process and write its audit line, pass or fail."""
+#: The NAME of the credential each peer is called with (§5). Never a value.
+CREDENTIAL = {"hubspot": "HUBSPOT_MCP_TOKEN_FILE", "anthropic": "ANTHROPIC_API_KEY",
+              "mailgun": "MAILGUN_API_KEY", "dry-run": ""}
+METHOD = {"mcp": "tools/call", "model": "POST", "http": "POST"}
+
+
+def _timed(peer: str, kind: str, operation: str, request: dict[str, Any],
+           call: Callable[[], Any], response: Callable[[Any], dict[str, Any]] | None = None,
+           endpoint: str = "", credential_name: str | None = None) -> Any:
+    """Run one call that leaves this process and write its audit record (§5),
+    pass or fail -- one record per attempt."""
     started = time.perf_counter()
+    common = dict(peer=peer, kind=kind, operation=operation, endpoint=endpoint,
+                  method=METHOD.get(kind, "POST"), request=request,
+                  credential_name=CREDENTIAL.get(peer, "") if credential_name is None
+                  else credential_name)
+    tries = {"n": 0}
+
+    def failed_attempt(attempt: int, error: str, duration_ms: float) -> None:
+        tries["n"] = attempt
+        elog.outbound_call(ok=False, status=None, error=error, attempt=attempt,
+                           duration_ms=duration_ms, response={}, **common)
+
+    token = hubspot_mcp.attempt_listener.set(failed_attempt)
     try:
         result = call()
     except Exception as exc:
-        t.outbound_call(service=service, endpoint=endpoint, ok=False, error=str(exc),
-                        params=params, duration_ms=round((time.perf_counter() - started) * 1000, 1))
+        if tries["n"] == 0:
+            elog.outbound_call(ok=False, status=None, error=str(exc), attempt=1,
+                               duration_ms=(time.perf_counter() - started) * 1000,
+                               response={}, **common)
         raise
-    t.outbound_call(service=service, endpoint=endpoint, status=200, params=params,
-                    duration_ms=round((time.perf_counter() - started) * 1000, 1),
-                    **(usage(result) if usage else {}))
+    finally:
+        hubspot_mcp.attempt_listener.reset(token)
+    elog.outbound_call(ok=True, status=200, attempt=tries["n"] + 1,
+                       duration_ms=(time.perf_counter() - started) * 1000,
+                       response=(response(result) if response else {}), **common)
     return result
 
 
@@ -312,10 +339,10 @@ class LeadTools:
     inside them. The model asks; this class decides."""
 
     def __init__(self, contact: dict[str, Any], object_id: str, trigger_id: str, sender: Sender,
-                 identity: dict[str, str], skills_root: Path, divert: str, dry_run: bool, t: Trace):
+                 identity: dict[str, str], skills_root: Path, divert: str, dry_run: bool):
         self.contact, self.object_id, self.trigger_id = contact, str(object_id), trigger_id
         self.sender, self.identity, self.root = sender, identity, skills_root.resolve()
-        self.divert, self.dry_run, self.t = divert, dry_run, t
+        self.divert, self.dry_run = divert, dry_run
         self.files_read: list[str] = []
         self.sent: SendResult | None = None
         self.subject = ""
@@ -333,10 +360,8 @@ class LeadTools:
         target = (self.root / path).resolve()
         if not target.is_relative_to(self.root) or not target.is_file():
             escaped = not target.is_relative_to(self.root)
-            self.t.warn(f"refused skill file read: {path}"
-                        + ("  (outside the skills folder)" if escaped else ""))
-            self.t.event("skill_file_refused", stream=AUDIT, requested=path,
-                         outside_skills_root=escaped)
+            elog.emit(elog.AUDIT, "skill_file_read_refused", requested=path,
+                      outside_skills_root=escaped)
             return f"Error: no such skill file: {path}"
         try:
             text = target.read_text(encoding="utf-8")
@@ -344,8 +369,8 @@ class LeadTools:
             return f"Error: could not read {path}: {exc}"
         rel = target.relative_to(self.root).as_posix()
         self.files_read.append(rel)
-        self.t.ok(f"read {rel}  sha {digest(text)}")
-        self.t.event("skill_file_read", path=rel, sha=digest(text), chars=len(text))
+        elog.emit(elog.PROCESS, "skill_file_read_ok", path=rel, sha=digest(text),
+                  chars=len(text))
         return text
 
     def send_email(self, subject: str, body: str) -> str:
@@ -358,21 +383,19 @@ class LeadTools:
         subject, body = subject.strip(), body.strip()
         if not subject or not body:
             return "Error: subject and body are both required."
-        t = self.t
-
         rejected = self._guardrail(body)
         if rejected:
             return rejected
 
-        t.step("Add the footer (postal address + unsubscribe) — by code, not the model")
-        text = with_footer(body, self.identity, UNSUBSCRIBE_TOKEN)
-        html_body = as_html(body, self.identity, UNSUBSCRIBE_TOKEN)
-        sent_file = write_transcript(t.trace_id, "Email as sent", f"Subject: {subject}\n\n{text}")
-        # Subject in full (our words); body as sha + length (it carries their name).
-        t.event("draft", subject=subject, body_chars=len(body), body_sha=digest(body))
-        t.event("footer_added", postal_address=self.identity["postal_address"],
-                unsubscribe_token=UNSUBSCRIBE_TOKEN, final_chars=len(text),
-                html_chars=len(html_body), sent_file=sent_file)
+        with elog.step("add_footer", subject=subject, body_chars=len(body)) as frame:
+            text = with_footer(body, self.identity, UNSUBSCRIBE_TOKEN)
+            html_body = as_html(body, self.identity, UNSUBSCRIBE_TOKEN)
+            sent_file = write_transcript(elog.trace_id(), "Email as sent",
+                                         f"Subject: {subject}\n\n{text}")
+            # Subject in full (our words); body as sha + length (it carries their name).
+            frame.ok(body_sha=digest(body), postal_address=self.identity["postal_address"],
+                     unsubscribe_token=UNSUBSCRIBE_TOKEN, final_chars=len(text),
+                     html_chars=len(html_body), sent_file=sent_file)
 
         email = (self.contact.get("email") or "").strip()
         recipient = email
@@ -384,27 +407,30 @@ class LeadTools:
         if self.divert:
             recipient, subject = self.divert, f"[TEST -> {email}] {subject}"
             variables |= {"bo_intended_to": email, "bo_redirected": "true"}
-            t.warn(f"REDIRECT ACTIVE — this email goes to {self.divert}, NOT to the lead. "
-                   f"Unset EMAIL_AGENT_REDIRECT_TO to reach real leads.")
-            # This person did NOT receive the email we composed for them. That is a
-            # delivery decision about an individual, so it belongs with the other
-            # per-lead decisions rather than among the narration.
-            t.event("redirect_active", stream=AUDIT, object_id=self.object_id,
-                    to=self.divert)
+            # This person did NOT receive the email we composed for them -- a
+            # delivery decision about an individual, so it is audited.
+            elog.emit(elog.AUDIT, "send_redirected", object_id=self.object_id,
+                      to=self.divert)
 
-        t.step(f"Deliver through {'the dry-run file' if self.dry_run else 'Mailgun'}")
-        try:
-            self.sent = _timed(t, "dry-run" if self.dry_run else "mailgun", "messages",
-                               {"subject": subject, "redirected": bool(self.divert)},
-                               lambda: self.sender.send(to=recipient, subject=subject, body=text,
-                                                        variables=variables, html=html_body),
-                               usage=lambda r: {"message_id": r.message_id})
-        except SendError as exc:
-            self.send_error = str(exc)
-            t.fail(f"send refused: {exc}")
-            return f"Error: the email could not be sent ({exc}). Do not retry — you are done."
-        self.subject = subject
-        return "Sent. You are done — do not send again."
+        with elog.step("deliver", to=recipient, subject=subject,
+                       redirected=bool(self.divert), dry_run=self.dry_run) as frame:
+            try:
+                self.sent = _timed(
+                    "dry-run" if self.dry_run else "mailgun", "http", "messages",
+                    {"subject": subject, "to": recipient, "html_chars": len(html_body),
+                     "variables": variables},
+                    lambda: self.sender.send(to=recipient, subject=subject, body=text,
+                                             variables=variables, html=html_body),
+                    response=lambda r: {"message_id": r.message_id, "status": 200},
+                    endpoint="/messages",
+                    credential_name="" if self.dry_run else "MAILGUN_API_KEY")
+            except SendError as exc:
+                self.send_error = str(exc)
+                frame.failed(f"SendError: {exc}")
+                return f"Error: the email could not be sent ({exc}). Do not retry — you are done."
+            frame.ok(message_id=self.sent.message_id)
+            self.subject = subject
+            return "Sent. You are done — do not send again."
 
     def _guardrail(self, body: str) -> str:
         """The role's own words must survive into the email, unaltered.
@@ -429,20 +455,17 @@ class LeadTools:
 
         if len(matched) >= GUARDRAIL_FLOOR or self.guard_rejections:
             result = "pass" if len(matched) >= GUARDRAIL_FLOOR else "failed_open"
-            if result == "failed_open":
-                self.t.warn(f"GUARDRAIL — only {len(matched)} phrase(s) exact after a retry; "
-                            f"sending anyway and recording it")
-            self.t.event("guardrail_checked", stream=AUDIT, result=result, asset=asset,
-                         title=self.contact.get("title", ""), exact=len(matched),
-                         floor=GUARDRAIL_FLOOR, available=len(phrases),
-                         matched=matched, attempt=self.guard_rejections + 1)
+            elog.emit(elog.AUDIT, "guardrail_checked", result=result, asset=asset,
+                      title=self.contact.get("title", ""), exact=len(matched),
+                      floor=GUARDRAIL_FLOOR, available=len(phrases),
+                      matched=matched, attempt=self.guard_rejections + 1)
             return ""
 
         self.guard_rejections += 1
-        self.t.warn(f"GUARDRAIL — {len(matched)} of {GUARDRAIL_FLOOR} phrases exact; "
+        _ = (f"{len(matched)} of {GUARDRAIL_FLOOR} phrases exact; "
                     f"sending the draft back to the model")
-        self.t.event("guardrail_checked", stream=AUDIT, result="retry", asset=asset,
-                     title=self.contact.get("title", ""), exact=len(matched),
+        elog.emit(elog.AUDIT, "guardrail_checked", result="retry", asset=asset,
+                  title=self.contact.get("title", ""), exact=len(matched),
                      floor=GUARDRAIL_FLOOR, available=len(phrases),
                      matched=matched, attempt=1)
         return ("Not sent. The role's phrases must appear word for word, and "
@@ -457,15 +480,28 @@ class LeadTools:
         if self.sent:
             return "Error: the email was already sent; this lead cannot be flagged now."
         self.flagged = reason.strip() or "no reason given"
-        self.t.warn(f"model flagged the lead: {self.flagged}")
         return "Flagged. You are done."
 
 
 ModelFn = Callable[[str, str, LeadTools], None]
 
 
+def _timeout_seconds(client: Any) -> float | None:
+    """§5 -- `timeout_s` is what was sent, so it is read off the client that
+    sends it, never written down here as a literal. `httpx.Timeout` carries
+    four; the read timeout is the one a model call waits on."""
+    try:
+        timeout = getattr(client, "timeout", None)
+        if timeout is None:
+            return None
+        read = getattr(timeout, "read", timeout)
+        return float(read) if isinstance(read, (int, float)) else None
+    except Exception:                                    # noqa: BLE001 -- §9
+        return None
+
+
 def run_tool_loop(system: str, user: str, tools: LeadTools, *, model: str, max_tokens: int,
-                  max_turns: int, thinking: bool, t: Trace) -> None:
+                  max_turns: int, thinking: bool) -> None:
     """Production model_fn: the SDK's Tool Runner drives Claude until it stops calling
     tools. One audit line per model turn."""
     import anthropic
@@ -500,28 +536,62 @@ def run_tool_loop(system: str, user: str, tools: LeadTools, *, model: str, max_t
         """
         return tools.flag_lead(reason)
 
-    params: dict[str, Any] = {"model": model, "max_tokens": max_tokens, "max_turns": max_turns}
+    #: §5 -- `request` is what was SENT. For a model call that is the model,
+    #: the prompt, the system prompt, max_tokens, the tools offered and
+    #: `timeout_s`. The mode cuts it (§8); nothing here does.
+    client = anthropic.Anthropic(default_headers=elog.traceparent())
+    request: dict[str, Any] = {
+        "model": model, "max_tokens": max_tokens, "max_turns": max_turns,
+        "prompt": user, "system": system,
+        "tools": ["read_skill_file", "send_email", "flag_lead"],
+        "timeout_s": _timeout_seconds(client),
+    }
     try:
-
-        runner = anthropic.Anthropic().beta.messages.tool_runner(
+        runner = client.beta.messages.tool_runner(
             model=model, max_tokens=max_tokens, max_iterations=max_turns,
             system=system, messages=[{"role": "user", "content": user}],
             tools=[read_skill_file, send_email, flag_lead],
             cache_control={"type": "ephemeral"},
             **({"thinking": {"type": "adaptive"}} if thinking else {}))
-        started = time.perf_counter()
+        started, turn = time.perf_counter(), 0
         for message in runner:
-            u = message.usage
-            t.outbound_call(service="anthropic", endpoint="messages.create", status=200,
-                            duration_ms=round((time.perf_counter() - started) * 1000, 1),
-                            params={**params, "stop_reason": message.stop_reason},
-                            input_tokens=u.input_tokens, output_tokens=u.output_tokens,
-                            cache_read_input_tokens=getattr(u, "cache_read_input_tokens", 0) or 0)
+            turn += 1
+            usage = message.usage
+            response: dict[str, Any] = {
+                "status": 200, "ok": True, "stop_reason": message.stop_reason,
+                "input_tokens": usage.input_tokens, "output_tokens": usage.output_tokens,
+                "text": _model_text(message),
+                "tool_uses": sum(1 for b in (message.content or [])
+                                 if getattr(b, "type", "") == "tool_use"),
+            }
+            for extra in ("cache_read_input_tokens", "cache_creation_input_tokens",
+                          "web_search_requests"):
+                value = getattr(usage, extra, None)
+                if value:
+                    response[extra] = value
+            if elog.mode() == elog.DEBUG:
+                response["raw"] = message.model_dump() if hasattr(message, "model_dump") else str(message)
+            elog.outbound_call(peer="anthropic", kind="model", operation=model,
+                               endpoint="/v1/messages", method="POST", status=200, ok=True,
+                               attempt=turn, credential_name=CREDENTIAL["anthropic"],
+                               duration_ms=(time.perf_counter() - started) * 1000,
+                               request=request, response=response)
             started = time.perf_counter()
     except anthropic.APIError as exc:
-        t.outbound_call(service="anthropic", endpoint="messages.create", ok=False,
-                        error=str(exc), params=params)
+        elog.outbound_call(peer="anthropic", kind="model", operation=model,
+                           endpoint="/v1/messages", method="POST", status=None, ok=False,
+                           attempt=1, credential_name=CREDENTIAL["anthropic"],
+                           duration_ms=(time.perf_counter() - started
+                                        if "started" in dir() else 0) * 1000,
+                           request=request, response={}, error=str(exc))
         raise ModelError(f"model call failed ({model}): {exc}") from exc
+
+
+def _model_text(message: Any) -> str:
+    """The model's own words from one turn -- the result, and shown (§5)."""
+    parts = [getattr(b, "text", "") for b in (getattr(message, "content", None) or [])
+             if getattr(b, "type", "") == "text"]
+    return "\n".join(p for p in parts if p)
 
 
 # ------------------------------------------------------------------- agent
@@ -537,157 +607,191 @@ class EmailAgent:
         self.system_prompt = load_system_prompt(REPO_ROOT / str(config["skill"]["system_prompt"]))
         self.model_fn = model_fn or self._run_model
 
-    def work(self, object_id: str, trigger_id: str = "", t: Trace | None = None) -> Outcome:
-        """The whole pipeline for one lead."""
-        t = (t or Trace.disabled()).bind(object_id=str(object_id), trigger_id=trigger_id)
+    def work(self, object_id: str, trigger_id: str = "") -> Outcome:
+        """The whole pipeline for one lead. The caller has already opened the
+        run (§4), so this writes steps inside it."""
         try:
-            contact = self._read(object_id, t)
-            self._guards(contact, object_id, t)
+            with elog.step("read_contact", object_id=object_id) as frame:
+                contact = self._read(object_id, frame)
+            with elog.step("check_guards", object_id=object_id) as frame:
+                self._guards(contact, object_id, frame)
             divert = redirect_target()
-            self._claim(object_id, divert, t)
-            tools = self._model(contact, object_id, trigger_id, divert, t)
+            with elog.step("claim_lead", object_id=object_id, redirected=bool(divert)) as frame:
+                self._claim(object_id, divert, frame)
+            with elog.step("compose_and_send", object_id=object_id,
+                           model=self.config["model"]["name"]) as frame:
+                tools = self._model(contact, object_id, trigger_id, divert, frame)
         except Skipped as stop:
             return Outcome(object_id, "skipped", str(stop))
         except Failed as stop:
             return Outcome(object_id, "failed", str(stop))
 
         sent = tools.sent
-        t.ok(sent.detail + ("" if self.dry_run else f" — to {self.divert_or(contact, divert)}"))
-        return Outcome(object_id, "sent", sent.detail, subject=tools.subject, message_id=sent.message_id,
-                       reference=",".join(tools.files_read), dry_run=self.dry_run)
+        return Outcome(object_id, "sent", sent.detail, subject=tools.subject,
+                       message_id=sent.message_id, reference=",".join(tools.files_read),
+                       dry_run=self.dry_run)
 
     @staticmethod
     def divert_or(contact: dict[str, Any], divert: str) -> str:
         return divert or (contact.get("email") or "").strip()
 
     # ------------------------------------------------------------- steps
-    def _read(self, object_id: str, t: Trace) -> dict[str, Any]:
-        t.step(f"Read contact {object_id} from HubSpot via MCP")
+    def _read(self, object_id: str, frame: elog.Step) -> dict[str, Any]:
         asked = list(self.config["guards"]["contact_properties"])
         params = {"objectIds": [int(object_id)], "properties": asked}   # int: HubSpot rejects a quoted id
         # A HubSpotMCPError propagates: not this contact's fault, so app.py answers 503
         # and the gateway retries.
-        result = _timed(t, "hubspot", "get_crm_objects", params,
-                        lambda: self.hs.call("get_crm_objects", {"objectType": "CONTACT", **params}))
+        result = _timed("hubspot", "mcp", "get_crm_objects", params,
+                        lambda: self.hs.call("get_crm_objects", {"objectType": "CONTACT", **params}),
+                        response=lambda r: {"keys": sorted(map(str, r or {})), "status": 200},
+                        endpoint=self.hs.server_url)
         props = ((result.get("objects") or [{}])[0].get("properties")) or {}
         if not props:
-            t.fail(f"contact {object_id} not found in HubSpot")
             raise Failed("contact not found in HubSpot")
         present = sorted(k for k, v in props.items() if str(v or "").strip())
         empty = sorted(set(asked) - set(present))
-        t.ok(f"got {len(present)} of {len(asked)} properties from {self.hs.server_url}")
         # Property NAMES only — never values.
-        t.event("contact_read", server=self.hs.server_url,
-                properties_returned=present, empty_or_absent=empty)
+        self._check_carrier(props)
+        frame.ok(server=self.hs.server_url, properties_returned=present,
+                 empty_or_absent=empty, asked=len(asked))
         return props
 
-    def _guards(self, contact: dict[str, Any], object_id: str, t: Trace) -> None:
+    def _check_carrier(self, props: dict[str, Any]) -> None:
+        """The contact carries `trace_id` (Input 1, the crossing into HubSpot).
+        The id for this run was set at the door from the gateway's header and
+        cannot move now, so the carrier is CHECKED, not adopted. A difference or
+        an absence is named rather than passed over."""
+        stored = str(props.get("trace_id") or "").strip()
+        current = elog.trace_id()
+        if not stored:
+            elog.system("trace_missing", where="hubspot.contact.trace_id")
+        elif stored != current:
+            elog.emit(elog.PROCESS, "carrier_check_mismatch",
+                      carrier="hubspot.contact.trace_id", stored_trace_id=stored)
+        else:
+            elog.emit(elog.PROCESS, "carrier_check_ok", carrier="hubspot.contact.trace_id")
+
+    def _guards(self, contact: dict[str, Any], object_id: str, frame: elog.Step) -> None:
         """Four checks, in this order. Any 'no' stops the lead here."""
-        t.step("Check the guards before writing anything")
         guards = self.config["guards"]
         status = (contact.get("email_status") or "").strip().upper()
         blocked = list(guards["skip_if_status_in"])
 
         if not (contact.get("email") or "").strip():
-            t.event("guard_stopped", stream=AUDIT, guard="email", value="(empty)",
-                    outcome="FAILED", reason="no email address")
-            self._fail(t, object_id, "bad data: no email address")
+            elog.emit(elog.AUDIT, "guard_stopped_failed", guard="email", value="(empty)",
+                      reason="no email address")
+            self._fail(object_id, "bad data: no email address")
         if status in {s.upper() for s in blocked}:
-            raise self._skip(t, "email_status", status,
+            raise self._skip("email_status", status,
                              f"already {status.lower()} — this person has been contacted",
                              blocked_by=blocked)
         if (contact.get("hs_email_optout") or "").lower() == "true":
-            raise self._skip(t, "hs_email_optout", "true", "contact opted out of all email in HubSpot")
+            raise self._skip("hs_email_optout", "true", "contact opted out of all email in HubSpot")
         if guards.get("require_decision_maker") and (contact.get("decision_maker") or "").lower() != "true":
-            raise self._skip(t, "decision_maker", contact.get("decision_maker") or "(empty)",
+            raise self._skip("decision_maker", contact.get("decision_maker") or "(empty)",
                              "decision_maker is no longer true")
 
-        t.ok("has an email address, not contacted before, not opted out, still a decision maker")
-        t.event("guards_passed", stream=AUDIT, email_status=status or "(empty)",
-                hs_email_optout=contact.get("hs_email_optout") or "(empty)",
-                decision_maker=contact.get("decision_maker") or "(empty)",
-                require_decision_maker=bool(guards.get("require_decision_maker")),
-                skip_if_status_in=blocked)
+        elog.emit(elog.AUDIT, "guards_passed", email_status=status or "(empty)",
+                  hs_email_optout=contact.get("hs_email_optout") or "(empty)",
+                  decision_maker=contact.get("decision_maker") or "(empty)",
+                  require_decision_maker=bool(guards.get("require_decision_maker")),
+                  skip_if_status_in=blocked)
+        frame.ok(email_status=status or "(empty)", passed=True)
 
     @staticmethod
-    def _skip(t: Trace, guard: str, value: str, reason: str, **fields: Any) -> Skipped:
-        t.warn(f"STOPPING: {reason} — no email will be written")
-        t.event("guard_stopped", stream=AUDIT, guard=guard, value=value,
-                outcome="skipped", **fields)
+    def _skip(guard: str, value: str, reason: str, **fields: Any) -> Skipped:
+        elog.emit(elog.AUDIT, "guard_stopped_skipped", guard=guard, value=value,
+                  reason=reason, **fields)
         return Skipped(reason)
 
-    def _fail(self, t: Trace, object_id: str, reason: str) -> None:
+    def _fail(self, object_id: str, reason: str) -> None:
         """FAILED in HubSpot with the reason, then stop. Nobody is dropped silently."""
-        t.fail(reason)
-        self._status(object_id, FAILED, t)
+        self._status(object_id, FAILED)
         raise Failed(reason)
 
-    def _claim(self, object_id: str, divert: str, t: Trace) -> None:
+    def _claim(self, object_id: str, divert: str, frame: elog.Step) -> None:
         """email_status=SENT BEFORE the model runs, so a gateway retry mid-compose cannot
         send a second email. A redirected send is a test: the lead received nothing and
         must stay contactable, so it is not claimed."""
-        t.step("Claim this lead in HubSpot (email_status = SENT)")
         if divert:
-            t.warn("SKIPPED — redirected test send; this lead must stay contactable")
-            t.event("hubspot_write_skipped", stream=AUDIT, object_id=object_id, would_write=SENT,
-                    reason="redirect active: the lead receives nothing")
+            elog.emit(elog.AUDIT, "hubspot_write_skipped", object_id=object_id,
+                      would_write=SENT, reason="redirect active: the lead receives nothing")
+            frame.skipped("redirected test send; this lead must stay contactable")
         else:
-            self._status(object_id, SENT, t)
+            self._status(object_id, SENT)
+            frame.ok(email_status=SENT)
 
     def _model(self, contact: dict[str, Any], object_id: str, trigger_id: str,
-               divert: str, t: Trace) -> LeadTools:
+               divert: str, frame: elog.Step) -> LeadTools:
         """Hand the lead to the model. It reads the skill, writes, and sends — through tools."""
-        model = self.config["model"]
-        t.step(f"Hand the lead to {model['name']} with the skill catalogue and three tools")
         tools = LeadTools(contact, object_id, trigger_id, self.sender, self.config["sender"],
-                          self.skills_root, divert, self.dry_run, t)
+                          self.skills_root, divert, self.dry_run)
         system = render_system_prompt(self.system_prompt, self.catalogue, self.config["sender"])
         user = lead_message(contact)
-        prompt_file = write_transcript(t.trace_id, "System prompt + lead message",
+        prompt_file = write_transcript(elog.trace_id(), "System prompt + lead message",
                                        f"{system}\n\n---\n\n{user}")
-        t.event("prompt_built",
-                agent_md=_rel(self.system_prompt.path), agent_md_sha=self.system_prompt.sha,
-                skills=[f"{_rel(s.path)}@{s.sha}" for s in self.catalogue],
-                prompt_chars=len(system) + len(user), prompt_sha=digest(system + user),
-                prompt_file=prompt_file)
+        elog.emit(elog.PROCESS, "prompt_built",
+                  agent_md=_rel(self.system_prompt.path), agent_md_sha=self.system_prompt.sha,
+                  skills=[f"{_rel(s.path)}@{s.sha}" for s in self.catalogue],
+                  prompt_chars=len(system) + len(user), prompt_sha=digest(system + user),
+                  prompt_file=prompt_file)
         try:
             self.model_fn(system, user, tools)
         except ModelError as exc:
-            self._fail(t, object_id, f"compose: {exc}")
-        t.event("model_done", files_read=tools.files_read, sent=bool(tools.sent),
-                flagged=tools.flagged, reply_file=_rel(transcript_path(t.trace_id)))
+            self._fail(object_id, f"compose: {exc}")
         if tools.flagged:
-            self._fail(t, object_id, f"flagged by model: {tools.flagged}")
+            self._fail(object_id, f"flagged by model: {tools.flagged}")
         if tools.send_error:
-            self._fail(t, object_id, f"send: {tools.send_error}")
+            self._fail(object_id, f"send: {tools.send_error}")
         if not tools.sent:
-            self._fail(t, object_id, "model finished without sending or flagging the lead")
+            self._fail(object_id, "model finished without sending or flagging the lead")
+        frame.ok(files_read=tools.files_read, sent=True, subject=tools.subject,
+                 reply_file=_rel(transcript_path(elog.trace_id())))
         return tools
 
     def _run_model(self, system: str, user: str, tools: LeadTools) -> None:
         m = self.config["model"]
         run_tool_loop(system, user, tools, model=m["name"], max_tokens=int(m.get("max_tokens", 4096)),
                       max_turns=int(m.get("max_turns", 8)),
-                      thinking=str(m.get("thinking", "adaptive")).lower() != "off", t=tools.t)
+                      thinking=str(m.get("thinking", "adaptive")).lower() != "off")
 
-    def _status(self, object_id: str, status: str, t: Trace) -> None:
+    def _status(self, object_id: str, status: str) -> None:
         """Write email_status. Best effort: a failed write is logged, never raised."""
         if self.dry_run:
-            t.warn(f"SKIPPED — dry run writes nothing to HubSpot (would write {status})")
-            t.event("hubspot_write_skipped", stream=AUDIT, object_id=object_id, would_write=status,
-                    reason="dry run writes nothing to HubSpot")
+            elog.emit(elog.AUDIT, "hubspot_write_skipped", object_id=object_id,
+                      would_write=status, reason="dry run writes nothing to HubSpot")
             return
-        params = {"objectId": int(object_id), "email_status": status}
+        #: The write that claims the lead also carries the trace id (Input 1).
+        #: If HubSpot refuses that save, `email_status` goes again on its own:
+        #: it is what stops a second email, and the carrier is never allowed to
+        #: be the reason it does not land.
+        properties = {"email_status": status}
+        if elog.trace_id():
+            properties["trace_id"] = elog.trace_id()
         try:
-            _timed(t, "hubspot", "manage_crm_objects", params,
-                   lambda: self.hs.call("manage_crm_objects", {
-                       "confirmationStatus": "CONFIRMED",
-                       "updateRequest": {"objects": [{
-                           "objectType": "contacts", "objectId": int(object_id),
-                           "properties": {"email_status": status}}]}}))
+            self._update(object_id, properties)
         except HubSpotMCPError:
+            if "trace_id" not in properties:
+                return
+            try:
+                self._update(object_id, {"email_status": status})
+            except HubSpotMCPError:
+                return
+            elog.emit(elog.AUDIT, "status_written", email_status=status, carrier_written=False)
             return
-        t.event("status_written", stream=AUDIT, email_status=status)
+        elog.emit(elog.AUDIT, "status_written", email_status=status,
+                  carrier_written="trace_id" in properties)
+
+    def _update(self, object_id: str, properties: dict[str, str]) -> None:
+        _timed("hubspot", "mcp", "manage_crm_objects",
+               {"objectId": int(object_id), **properties},
+               lambda: self.hs.call("manage_crm_objects", {
+                   "confirmationStatus": "CONFIRMED",
+                   "updateRequest": {"objects": [{
+                       "objectType": "contacts", "objectId": int(object_id),
+                       "properties": properties}]}}),
+               response=lambda r: {"keys": sorted(map(str, r or {})), "status": 200},
+               endpoint=self.hs.server_url)
 
 
 # ------------------------------------------------------------------ footer

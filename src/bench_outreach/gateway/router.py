@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from ..common.trace import new_trace_id
+from ..common.settings import env
 from .events import HubSpotEvent
 
 
@@ -153,25 +155,29 @@ class RoutingResult:
     errors: list[str] = field(default_factory=list)   # matched but unusable → 503
 
 
+#: Prefix on every trigger id. One project, one prefix, so a line pulled out of
+#: a shared log still says which system produced it.
+PROJECT_ID = env("BENCH_PROJECT_ID") or "bslg"
+
+
 def mint_trigger_id(event: HubSpotEvent) -> str:
-    """The id for the WORK this event asks for, carried by every service that touches it.
+    """The id of the WORK this event asks for: `<project>-<utc stamp>-<12 hex>`.
 
-    It is a `new_trace_id`, not a format of its own, because the email agent adopts it
-    as its own `trace_id`: one string joins the gateway's records to the agent's. The
-    old `trg-<sha1>` shape could not join to anything -- a real run left the gateway on
-    `bslg-20260921T110330-...` and the agent on `trg-5a169f51a5f6`.
-
-    Both halves are pinned to the EVENT, never to the clock or the delivery: the seed
-    from HubSpot's own event identity, and the timestamp from `occurred_at`, the moment
-    HubSpot says the property changed. So a redelivery -- a retry seconds later, the
-    same event arriving twice -- reproduces the id exactly, and the retry is visibly
-    the same work rather than new work.
+    This is a TRIGGER id, not a trace id, and the two must never be confused.
+    A trace id is random, 32 hex, born where the work starts (§3). A trigger id
+    is the opposite on purpose: DETERMINISTIC per HubSpot event -- seeded from
+    the event's identity, stamped from its own `occurred_at` -- so a redelivery
+    mints the same string and the dedupe store recognises it. Never 32 hex, so
+    no parser can mistake one for the other. Logged as an ordinary field.
     """
     key = f"{event.portal_id}:{event.event_id}" if event.event_id else (
         f"{event.portal_id}:{event.object_id}:{event.property_name}:"
         f"{event.property_value}:{event.occurred_at}"
     )
-    return new_trace_id(key, at=event.occurred_at)
+    when = (datetime.fromtimestamp(event.occurred_at / 1000, timezone.utc)
+            if event.occurred_at else datetime.now(timezone.utc))
+    stamp = when.strftime("%Y%m%dT%H%M%S")
+    return f"{PROJECT_ID}-{stamp}-{hashlib.sha1(key.encode()).hexdigest()[:12]}"
 
 
 class Router:

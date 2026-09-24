@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from bench_outreach.common.trace import Trace
 from bench_outreach.email_agent.agent import (LeadTools, as_html, check_skill_files,
                                               load_system_prompt, render_system_prompt,
                                               skill_catalogue, with_footer)
@@ -142,7 +141,7 @@ def test_a_dangling_reference_is_caught_at_startup(tmp_path):
 # ------------------------------------------------------------ the file reader
 def _tools(root: Path) -> LeadTools:
     return LeadTools({"email": "x@example.com"}, "1", "trg", sender=None, identity=SENDER,
-                     skills_root=root, divert="", dry_run=True, t=Trace.disabled())
+                     skills_root=root, divert="", dry_run=True)
 
 
 def test_reads_only_inside_the_skills_folder(tmp_path):

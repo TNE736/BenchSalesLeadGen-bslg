@@ -18,6 +18,8 @@ runs the one-time browser consent; after that every run is headless.
 from __future__ import annotations
 
 import asyncio
+import time
+from contextvars import ContextVar
 import json
 import time
 from contextlib import asynccontextmanager
@@ -40,6 +42,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.auth import (AuthorizationCodeResult, OAuthClientInformationFull,
                              OAuthClientMetadata, OAuthMetadata, OAuthToken)
 
+from . import logging_core as _log
 from .settings import REPO_ROOT, env
 
 DEFAULT_SERVER_URL = "https://mcp.hubspot.com"
@@ -164,6 +167,14 @@ async def _headless_callback() -> AuthorizationCodeResult:
 
 
 # ------------------------------------------------------------------- client
+#: Set by the caller for the duration of one `call`, read by `acall`: how a
+#: retried transport failure reaches the audit stream as its own record without
+#: the MCP client knowing anything about logging. Context-local, so two calls in
+#: flight never see each other's listener.
+attempt_listener: ContextVar[Callable[[int, str, float], None] | None] = ContextVar(
+    "hubspot_mcp_attempt_listener", default=None)
+
+
 class HubSpotMCP:
     def __init__(
         self,
@@ -194,13 +205,20 @@ class HubSpotMCP:
     # -- async core
     async def acall(self, tool: str, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
         attempt = 0
+        listener = attempt_listener.get()
         while True:
             attempt += 1
+            tick = time.perf_counter()
             try:
                 async with self._session() as session:
                     result = await session.call_tool(tool, arguments or {})
                 break
             except (httpx2.TransportError, httpx2.TimeoutException) as exc:
+                #: Part 4: `outbound_call` once per ATTEMPT. A retried transport
+                #: failure is reported as it happens; the caller writes the record.
+                if listener is not None:
+                    listener(attempt, f"{type(exc).__name__}: {exc}",
+                             round((time.perf_counter() - tick) * 1000, 1))
                 if attempt > self._max_retries:
                     raise HubSpotMCPError(f"{tool}: transport failed after {attempt} tries: {exc}") from exc
                 await self._sleep(0.5 * (2 ** (attempt - 1)))
@@ -267,7 +285,8 @@ class HubSpotMCP:
 
     def _http_client(self, auth: OAuthClientProvider) -> httpx2.AsyncClient:
         """Separated so tests can swap in an in-process ASGI transport."""
-        return httpx2.AsyncClient(auth=auth, timeout=self._timeout)
+        #: §3 -- built per call, so the header carries the id current at the call.
+        return httpx2.AsyncClient(auth=auth, timeout=self._timeout, headers=_log.traceparent())
 
 
 def _first(eg: BaseException, types: tuple) -> BaseException | None:

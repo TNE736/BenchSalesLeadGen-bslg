@@ -1,6 +1,18 @@
 """Shared test fixtures."""
 
+import os
+import tempfile
+
 import pytest
+
+#: Before ANY application module is imported. Both apps run `create_app()` at
+#: import, which writes a `service_start` with a fresh trace id -- into the real
+#: `logs/agents/` if nothing says otherwise. Thirty test runs put seventy-nine
+#: phantom "runs" in the operator's log. Part 1's environment variable is the
+#: right lever: set here, at conftest import, it is in force when the test
+#: modules import the apps.
+os.environ.setdefault("LOG_DIR",
+                      tempfile.mkdtemp(prefix="bench-outreach-test-records-"))
 
 from bench_outreach.email_agent import agent as transcript
 
@@ -30,29 +42,34 @@ def _transcripts_stay_in_tmp(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _jsonl_stays_in_tmp(tmp_path, monkeypatch):
-    """No test writes into the repo's real logs/*.jsonl either.
+def _records_stay_in_tmp(tmp_path, monkeypatch):
+    """No test writes into the repo's real logs/.
 
-    The transcript fixture above covered the .md files and stopped there, so the
-    suite was still appending to logs/gateway/process.jsonl -- one pytest run left
-    127 lines of fixture traffic (`route "dm"`, `contact 101`) in the file you read
-    after a real run. `create_app(log_dir=...)` does not prevent it: `_logger`
-    returns early when the logger already has a handler, so whichever log_dir was
-    seen FIRST in the process wins and every later one is silently ignored.
-
-    Pointing REPO_ROOT at tmp_path is what actually moves the files, because that
-    is where the default `log_dir` is computed from.
+    LOG_DIR is the spec's own setting (§1) and outranks everything, so it is
+    the right lever. Both services' loggers are reset around each test, since
+    each holds one for the life of the process.
     """
-    from bench_outreach.common import settings, trace as trace_mod
-    from bench_outreach.gateway import app as gateway_app
-    # `trace._logger` does `from .settings import REPO_ROOT` at call time, so the
-    # settings module is the one that has to move -- patching trace's own namespace
-    # would do nothing.
+    from bench_outreach.common import settings
+    from bench_outreach.gateway import app as gateway_app, gateway_logging as glog
+    from bench_outreach.email_agent import email_agent_logging as elog
     monkeypatch.setattr(settings, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(gateway_app, "REPO_ROOT", tmp_path)
-    for logger in list(trace_mod.logging.Logger.manager.loggerDict):
-        if logger.startswith("bench_outreach.trace."):
-            live = trace_mod.logging.getLogger(logger)
-            for handler in list(live.handlers):
-                live.removeHandler(handler)
-                handler.close()
+    monkeypatch.setenv("LOG_DIR", str(tmp_path / "logs"))
+    glog.reset()
+    elog.reset()
+    yield
+    glog.reset()
+    elog.reset()
+
+
+@pytest.fixture(autouse=True)
+def _inside_a_run():
+    """Most tests call something that logs. A run gives those records a trace
+    id the way a real caller does; a test about where the id is born opens its
+    own."""
+    from bench_outreach.common import logging_core as core
+    token = core._TRACE.set(core.new_trace_id())
+    try:
+        yield
+    finally:
+        core._TRACE.reset(token)
