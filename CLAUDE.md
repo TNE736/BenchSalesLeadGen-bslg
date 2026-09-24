@@ -4,8 +4,8 @@ Guidance for Claude working in this repository. Read before any change.
 
 ## 1. What this is
 
-Phase 1 of the Bench Outreach Pipeline: load 300 bench consultants into HubSpot,
-email each about the one requisition they are grouped under, classify replies,
+Phase 1 of the Bench Outreach Pipeline: load bench consultants into MongoDB,
+email each about an open role that matches their title, classify replies,
 research the interested ones, send a qualifying follow-up, and hand qualified
 people to the Bench TA team. Phase 2 (the TA dashboard) is built only after
 Phase 1 runs end to end.
@@ -23,7 +23,7 @@ Before starting any step, stop and confirm with the user:
 
 1. **What is the task** for this step.
 2. **What are the inputs** — exact fields, sources, formats.
-3. **What are the expected outputs** — exact HubSpot properties, files, responses.
+3. **What are the expected outputs** — exact MongoDB fields, files, responses.
 4. **What has changed** since the document, as defined by the user at that moment.
 
 Only after those four are agreed does code get written. Then: implement, test with
@@ -45,12 +45,24 @@ steps that have been agreed exist — do not pre-create empty ones. Routing live
 
 ## 4. Conventions
 
-- **HubSpot is the system of record.** Agents hold no canonical lead state; on
-  conflict HubSpot wins. `qualification_stage` is the progress field.
+- **MongoDB is the system of record** (decided 24 Sep 2026, replacing HubSpot).
+  Database `bench_outreach`, collection `consultants`, one document per
+  consultant. Agents hold no canonical lead state; on conflict MongoDB wins.
+  `qualification_stage` is the progress field. Design:
+  "Bench Outreach: Replacing HubSpot with MongoDB — Design".
+- **Transition:** until the switch-over (build step M6) the running code still
+  reads and writes HubSpot through `common/hubspot_mcp.py`. New code goes through
+  `common/store.py` only. Do not add new HubSpot calls.
 - **No requisition linking / no `req_id`** (decided 16 Sep 2026).
-- **HubSpot only through HubSpot's hosted MCP** (`mcp.hubspot.com`) via
-  `common/hubspot_mcp.py`. No agent calls HubSpot REST directly; no MCP server of
-  our own (decided 16 Sep 2026).
+- **MongoDB only through `common/store.py`.** No agent imports `pymongo`
+  directly. MongoDB runs locally in WSL as replica set `rs0`
+  (`mongodb://localhost:27017/?replicaSet=rs0`); Change Streams on `consultants`
+  replace the HubSpot webhook.
+- **Consultants are loaded from CSV** with `mongoimport --mode merge
+  --upsertFields email`, then one `updateMany` sets `decision_maker: false`,
+  `opted_out: false`, `qualification_stage: "loaded"`. Never `--mode upsert`: it
+  replaces whole documents and wipes pipeline fields. People change only
+  `decision_maker` (and correct personal data) in Compass.
 - **Stages:** loaded -> emailed -> engaged -> researched -> followed_up ->
   qualified -> handed_off. Closing stages: suppressed, closed, invalid, referred.
   Only `loaded` contacts start the flow.
@@ -83,7 +95,8 @@ steps that have been agreed exist — do not pre-create empty ones. Routing live
 - Do not build steps 7+ from the document alone — they are under review.
 - Do not copy code from LQABR. It is reference only; anything reused is a decision
   recorded in `docs/adr/` first.
-- Do not add a second system of record.
+- Do not add a second system of record: once M6 is done, nothing syncs back to
+  HubSpot.
 - Do not scrape LinkedIn, or any source that forbids automated collection.
 - Do not exceed the 50-emails-a-day cap or send from an unwarmed address.
 - Do not disable signature verification outside local development.

@@ -6,6 +6,22 @@
   shape of the pipeline; it is not a spec. Field names, sheet columns, requisition
   handling and templates in it are *not* commitments. Each step is defined fresh
   with the user at build time.
+- **24 Sep 2026 — MongoDB replaces HubSpot as the system of record.** Local
+  MongoDB 8.0 in WSL Ubuntu, replica set `rs0`; database `bench_outreach` with
+  collections `consultants` and `pipeline_state`; indexes `email_unique` and
+  `stage_decision`. The gateway wakes on a Change Stream (with a resume bookmark
+  in `pipeline_state` and a catch-up scan) instead of the HubSpot webhook. People
+  view and flip `decision_maker` in MongoDB Compass. Consultants load from CSV
+  with `mongoimport --mode merge`, then an `updateMany` sets the starting fields.
+  Fields: `first_name`, `last_name`, `email`, `phone`, `technology`, `title`,
+  `seniority`, `visa_status`, `decision_maker`, `opted_out`,
+  `qualification_stage`, `email_status`, `trace_id`; no `history`,
+  `created_at`, `updated_at` or `hubspot_id`. Backups are a manual `mongodump`
+  to `Documents\mongo-backups` before big loads and the cloud move. A move to a
+  cloud database is expected later. Full design and decisions D1-D12:
+  "Bench Outreach: Replacing HubSpot with MongoDB — Design". **Supersedes the
+  16 Sep HubSpot-MCP decision below once build step M6 switches HubSpot off;**
+  until then the running code still uses HubSpot.
 - **16 Sep 2026 — HubSpot access goes through HubSpot's hosted MCP server
   (`mcp.hubspot.com`), for every agent.** No MCP server of our own, no direct
   HubSpot REST calls from agents, and not LQABR's in-process `mcp/hubspot` package.
